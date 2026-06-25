@@ -1,0 +1,38 @@
+# --- Python/Virtual Environment ---
+__pycache__/
+*.py[cod]
+*$py.class
+codingagent/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+
+# --- Environment Secrets ---
+.env
+.env
+.env.*
+
+# --- Databases ---
+*.sqlite3
+*.db
+
+# --- Project Specific Ignored Folders ---
+uploads/
+.uploads/
+pgvector/
+
+# --- OS/System Files ---
+.DS_Store
+Thumbs.db
+
+# --- IDEs and Editors ---
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
