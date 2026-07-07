@@ -128,11 +128,27 @@ async def process_codebase_task(project_id: str, file_path: str):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        print(f"Indexing Error: {e}")
-        project = db.query(Project).filter(Project.id == project_id).first()
-        if project:
-            project.status = "error"
+        print(f"Indexing Error for project {project_id}: {e}")
+
+        try:
+            # Clean up any partial embeddings CocoIndex may have written
+            deleted = db.query(CodeEmbedding).filter(
+                CodeEmbedding.project_id == project_id
+            ).delete(synchronize_session=False)
+            print(f"Cleaned up {deleted} partial embedding rows for project {project_id}")
+
+            # Mark project as error so frontend knows
+            project = db.query(Project).filter(Project.id == project_id).first()
+            if project:
+                project.status = "error"
+
             db.commit()
+
+        except Exception as cleanup_error:
+            # If cleanup itself fails, rollback and log — don't let this swallow the original error
+            print(f"Cleanup failed for project {project_id}: {cleanup_error}")
+            db.rollback()
+
     finally:
         db.close()
         # Cleanup Zip
