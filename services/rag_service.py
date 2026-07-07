@@ -47,15 +47,27 @@ class RAGService:
 
     def _ensure_session_exists(self, session_id: str, project_id: str):
         from models.database import ChatSession
-        session = self.db.query(ChatSession).filter(ChatSession.id == session_id).first()
-        if not session:
-            new_session = ChatSession(
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+
+        stmt = (
+            pg_insert(ChatSession)
+            .values(
                 id=session_id,
                 project_id=project_id,
-                title="New Chat"
+                title="New Chat",
+                created_at=now,
+                updated_at=now
             )
-            self.db.add(new_session)
-            self.db.commit()
+            .on_conflict_do_update(
+                index_elements=["id"],
+                set_={"updated_at": now}   # just bump updated_at on every query — marks session as active
+            )
+        )
+        self.db.execute(stmt)
+        self.db.commit()
 
     def _save_message(self, session_id: str, role: str, content: str, context_files: list):
         from models.database import Message

@@ -204,15 +204,49 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     return APIResponse(success=True, data=result)
 
 @app.post("/api/session/save", response_model=APIResponse)
-async def save_session(request: SessionSaveRequest, db: Session = Depends(get_db)):
-    session = db.query(ChatSession).filter(ChatSession.id == request.session_id).first()
-    if not session:
-        session = ChatSession(id=request.session_id, project_id=request.project_id, title=request.title)
-        db.add(session)
-    else:
-        session.title = request.title
+async def save_session(
+    request: SessionSaveRequest,
+    db: Session = Depends(get_db)
+):
+    # project existence check
+    project = db.query(Project).filter(Project.id == request.project_id).first()
+    if not project:
+        return APIResponse(success=False, error=f"Project {request.project_id} not found")
+
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+
+    stmt = (
+        pg_insert(ChatSession)
+        .values(
+            id=request.session_id,
+            project_id=request.project_id,
+            title=request.title,
+            created_at=now,
+            updated_at=now
+        )
+        .on_conflict_do_update(
+            index_elements=["id"],
+            set_={
+                "title": request.title,
+                "updated_at": now
+            }
+        )
+    )
+    db.execute(stmt)
     db.commit()
-    return APIResponse(success=True, data={"session_id": session.id})
+
+    session = db.query(ChatSession).filter(ChatSession.id == request.session_id).first()
+
+    return APIResponse(success=True, data=SessionResponse(
+        id=session.id,
+        title=session.title,
+        created_at=session.created_at,
+        updated_at=session.updated_at or session.created_at,
+        message_count=len(session.messages)
+    ).model_dump())
 
 @app.get("/api/sessions/{project_id}", response_model=APIResponse)
 async def get_sessions(
