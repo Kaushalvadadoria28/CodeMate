@@ -92,17 +92,20 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 # --- Background Worker ---
-async def process_codebase_task(project_id: str, file_path: str, db: Session):
+async def process_codebase_task(project_id: str, file_path: str):
+    # Open a dedicated session for this background task —
+    # do NOT reuse the request-scoped session, it will already be closed.
+    db = Session(bind=engine)
     try:
         extract_path = settings.UPLOAD_DIR / project_id
-        
+
         # 1. Extract
         with zipfile.ZipFile(file_path, 'r') as zip_ref:
             zip_ref.extractall(extract_path)
-            
+
         # 2. Update DB Stats
         file_count = sum([len(files) for r, d, files in os.walk(extract_path)])
-        
+
         project = db.query(Project).filter(Project.id == project_id).first()
         if project:
             project.files_count = file_count
@@ -110,13 +113,12 @@ async def process_codebase_task(project_id: str, file_path: str, db: Session):
 
         # 3. Index with CocoIndex
         await coco_service.index_codebase(project_id, str(extract_path))
-        
+
         # 4. Finish
         if project:
             project.status = "ready"
             db.commit()
 
-            
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -126,6 +128,7 @@ async def process_codebase_task(project_id: str, file_path: str, db: Session):
             project.status = "error"
             db.commit()
     finally:
+        db.close()
         # Cleanup Zip
         if os.path.exists(file_path):
             os.remove(file_path)
@@ -140,21 +143,22 @@ async def upload_codebase(
 ):
     project_id = str(uuid.uuid4())
     file_location = settings.UPLOAD_DIR / f"{project_id}.zip"
-    
+
     with open(file_location, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-        
+
     new_project = Project(
-        id=project_id, 
-        name=file.filename, 
+        id=project_id,
+        name=file.filename,
         status="indexing"
     )
     db.add(new_project)
     db.commit()
-    
-    # Run indexing synchronously (blocking the API response until complete)
-    await process_codebase_task(project_id, str(file_location), db)
-    return APIResponse(success=True, data={"project_id": project_id, "status": "ready"})
+
+    # Schedule indexing to run after the response is sent — non-blocking
+    background_tasks.add_task(process_codebase_task, project_id, str(file_location))
+
+    return APIResponse(success=True, data={"project_id": project_id, "status": "indexing"})
 
 @app.get("/api/indexing-status/{project_id}", response_model=APIResponse)
 async def get_indexing_status(project_id: str, db: Session = Depends(get_db)):
