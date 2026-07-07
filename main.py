@@ -5,15 +5,15 @@ import os
 import asyncio
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks, Request, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine
 
 from config import settings
-from models.database import Base, Project, ChatSession, CodeEmbedding
-from models.schemas import APIResponse, ChatRequest, SessionSaveRequest
+from models.database import Base, Project, ChatSession, CodeEmbedding, Message
+from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse
 from services.cocoindex_service import CocoIndexService
 from services.llm_service import LLMService
 from services.rag_service import RAGService
@@ -204,18 +204,134 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     return APIResponse(success=True, data=result)
 
 @app.post("/api/session/save", response_model=APIResponse)
-async def save_session(request: SessionSaveRequest, db: Session = Depends(get_db)):
-    session = db.query(ChatSession).filter(ChatSession.id == request.session_id).first()
-    if not session:
-        session = ChatSession(id=request.session_id, project_id=request.project_id, title=request.title)
-        db.add(session)
-    else:
-        session.title = request.title
+async def save_session(
+    request: SessionSaveRequest,
+    db: Session = Depends(get_db)
+):
+    # project existence check
+    project = db.query(Project).filter(Project.id == request.project_id).first()
+    if not project:
+        return APIResponse(success=False, error=f"Project {request.project_id} not found")
+
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+
+    stmt = (
+        pg_insert(ChatSession)
+        .values(
+            id=request.session_id,
+            project_id=request.project_id,
+            title=request.title,
+            created_at=now,
+            updated_at=now
+        )
+        .on_conflict_do_update(
+            index_elements=["id"],
+            set_={
+                "title": request.title,
+                "updated_at": now
+            }
+        )
+    )
+    db.execute(stmt)
     db.commit()
-    return APIResponse(success=True, data={"session_id": session.id})
+
+    session = db.query(ChatSession).filter(ChatSession.id == request.session_id).first()
+
+    return APIResponse(success=True, data=SessionResponse(
+        id=session.id,
+        title=session.title,
+        created_at=session.created_at,
+        updated_at=session.updated_at or session.created_at,
+        message_count=len(session.messages)
+    ).model_dump())
 
 @app.get("/api/sessions/{project_id}", response_model=APIResponse)
-async def get_sessions(project_id: str, db: Session = Depends(get_db)):
-    sessions = db.query(ChatSession).filter(ChatSession.project_id == project_id).all()
-    data = [{"id": s.id, "title": s.title, "created_at": s.created_at} for s in sessions]
-    return APIResponse(success=True, data=data)
+async def get_sessions(
+    project_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    sort_by: str = Query(default="updated_at", enum=["updated_at", "created_at"]),
+    db: Session = Depends(get_db)
+):
+    # project existence check
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        return APIResponse(success=False, error=f"Project {project_id} not found")
+
+    base_query = db.query(ChatSession).filter(ChatSession.project_id == project_id)
+    total = base_query.count()
+
+    sort_column = ChatSession.updated_at if sort_by == "updated_at" else ChatSession.created_at
+
+    sessions = (
+        base_query
+        .order_by(sort_column.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    data = PaginatedSessionsResponse(
+        sessions=[
+            SessionResponse(
+                id=s.id,
+                title=s.title,
+                created_at=s.created_at,
+                updated_at=s.updated_at or s.created_at,
+                message_count=len(s.messages)
+            )
+            for s in sessions
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+        has_more=(offset + limit) < total
+    )
+
+    return APIResponse(success=True, data=data.model_dump())
+
+@app.get("/api/sessions/{session_id}/messages", response_model=APIResponse)
+async def get_messages(
+    session_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db)
+):
+    # session existence check
+    session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    if not session:
+        return APIResponse(success=False, error=f"Session {session_id} not found")
+
+    base_query = db.query(Message).filter(Message.session_id == session_id)
+    total = base_query.count()
+
+    messages = (
+        base_query
+        .order_by(Message.created_at.asc())   # asc — chronological order for chat
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    data = PaginatedMessagesResponse(
+        messages=[
+            MessageResponse(
+                id=m.id,
+                session_id=m.session_id,
+                role=m.role,
+                content=m.content,
+                created_at=m.created_at,
+                context_files=m.context_files
+            )
+            for m in messages
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+        has_more=(offset + limit) < total
+    )
+
+    return APIResponse(success=True, data=data.model_dump())
