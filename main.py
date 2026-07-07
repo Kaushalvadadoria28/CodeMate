@@ -19,7 +19,13 @@ from services.llm_service import LLMService
 from services.rag_service import RAGService
 
 # --- Database Setup ---
-engine = create_engine(settings.DATABASE_URL)
+engine = create_engine(settings.DATABASE_URL,
+                        pool_size=10,          # max persistent connections kept in the pool
+                        max_overflow=20,       # extra connections allowed under burst load (beyond pool_size)
+                        pool_pre_ping=True,    # test connection health before using it (handles DB restarts)
+                        pool_timeout=30,       # seconds to wait for a connection before raising an error
+                        pool_recycle=1800,     # recycle connections after 30 min (prevents stale connection errors
+    )
 Base.metadata.create_all(bind=engine)
 
 def get_db():
