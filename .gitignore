@@ -37,3 +37,4 @@ Thumbs.db
 *.sln
 *.swp
 alembic.ini
+requirements_copy.txt

@@ -6,13 +6,13 @@ class RAGService:
         self.llm = llm_service
         self.db = db_session
 
-    async def process_query(self, project_id: str, query: str, session_id: str, selected_files: list[str] = None):
+    async def process_query(self, project_id: str, query: str, session_id: str, selected_files: list[str] = None, top_k: int = 10):
         # 1. Retrieve (Mocked call - assumes you implement the vector query here)
         relevant_code = await self.cocoindex.search_relevant_code(
             project_id=project_id, 
             query=query, 
             db_session=self.db,
-            top_k=10
+            top_k=top_k
         )
         
         # 2. Filter
@@ -40,9 +40,21 @@ class RAGService:
             "sources": [c['filename'] for c in relevant_code]
         }
 
-    def _get_conversation_history(self, session_id: str):
+    def _get_conversation_history(self, session_id: str, max_messages: int = 20):
         from models.database import Message
-        msgs = self.db.query(Message).filter(Message.session_id == session_id).order_by(Message.created_at).all()
+
+        # fetch only last max_messages — prevents context window overflow
+        msgs = (
+            self.db.query(Message)
+            .filter(Message.session_id == session_id)
+            .order_by(Message.created_at.desc())   # desc to get latest first
+            .limit(max_messages)
+            .all()
+        )
+
+        # reverse back to chronological order for Gemini
+        msgs = list(reversed(msgs))
+
         return [{"role": m.role, "content": m.content} for m in msgs]
 
     def _ensure_session_exists(self, session_id: str, project_id: str):
