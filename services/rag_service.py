@@ -40,9 +40,21 @@ class RAGService:
             "sources": [c['filename'] for c in relevant_code]
         }
 
-    def _get_conversation_history(self, session_id: str):
+    def _get_conversation_history(self, session_id: str, max_messages: int = 20):
         from models.database import Message
-        msgs = self.db.query(Message).filter(Message.session_id == session_id).order_by(Message.created_at).all()
+
+        # fetch only last max_messages — prevents context window overflow
+        msgs = (
+            self.db.query(Message)
+            .filter(Message.session_id == session_id)
+            .order_by(Message.created_at.desc())   # desc to get latest first
+            .limit(max_messages)
+            .all()
+        )
+
+        # reverse back to chronological order for Gemini
+        msgs = list(reversed(msgs))
+
         return [{"role": m.role, "content": m.content} for m in msgs]
 
     def _ensure_session_exists(self, session_id: str, project_id: str):
