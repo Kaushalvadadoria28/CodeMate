@@ -18,6 +18,7 @@ from services.cocoindex_service import CocoIndexService
 from services.llm_service import LLMService
 from services.rag_service import RAGService
 from services.zip_validator import validate_zip
+from exceptions import ProjectNotFoundError, SessionNotFoundError, ProjectNotReadyError
 
 # --- Database Setup ---
 engine = create_engine(settings.DATABASE_URL,
@@ -96,6 +97,27 @@ async def global_exception_handler(request: Request, exc: Exception):
                 "code": "INTERNAL_SERVER_ERROR"
             }
         }
+    )
+
+@app.exception_handler(ProjectNotFoundError)
+async def project_not_found_handler(request: Request, exc: ProjectNotFoundError):
+    return JSONResponse(
+        status_code=404,
+        content={"success": False, "data": None, "error": str(exc)}
+    )
+
+@app.exception_handler(SessionNotFoundError)
+async def session_not_found_handler(request: Request, exc: SessionNotFoundError):
+    return JSONResponse(
+        status_code=404,
+        content={"success": False, "data": None, "error": str(exc)}
+    )
+
+@app.exception_handler(ProjectNotReadyError)
+async def project_not_ready_handler(request: Request, exc: ProjectNotReadyError):
+    return JSONResponse(
+        status_code=409,
+        content={"success": False, "data": None, "error": str(exc)}
     )
 
 # --- Background Worker ---
@@ -205,13 +227,19 @@ async def get_indexing_status(project_id: str, db: Session = Depends(get_db)):
 
 @app.post("/api/chat", response_model=APIResponse)
 async def chat(request: ChatRequest, db: Session = Depends(get_db)):
+    project = db.query(Project).filter(Project.id == request.project_id).first()
+    if not project:
+        raise ProjectNotFoundError(request.project_id)
+    if project.status != "ready":
+        raise ProjectNotReadyError(request.project_id, project.status)
+
     rag_service = RAGService(coco_service, llm_service, db)
     result = await rag_service.process_query(
         project_id=request.project_id,
         query=request.message,
         session_id=request.session_id,
         selected_files=request.selected_files,
-        top_k=request.top_k 
+        top_k=request.top_k
     )
     return APIResponse(success=True, data=result)
 
@@ -223,7 +251,7 @@ async def save_session(
     # project existence check
     project = db.query(Project).filter(Project.id == request.project_id).first()
     if not project:
-        return APIResponse(success=False, error=f"Project {request.project_id} not found")
+        raise ProjectNotFoundError(request.project_id)
 
     from sqlalchemy.dialects.postgresql import insert as pg_insert
     from datetime import datetime, timezone
@@ -271,7 +299,7 @@ async def get_sessions(
     # project existence check
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
-        return APIResponse(success=False, error=f"Project {project_id} not found")
+        raise ProjectNotFoundError(project_id)
 
     base_query = db.query(ChatSession).filter(ChatSession.project_id == project_id)
     total = base_query.count()
@@ -315,7 +343,7 @@ async def get_messages(
     # session existence check
     session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
     if not session:
-        return APIResponse(success=False, error=f"Session {session_id} not found")
+        raise SessionNotFoundError(session_id)
 
     base_query = db.query(Message).filter(Message.session_id == session_id)
     total = base_query.count()
