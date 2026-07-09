@@ -17,6 +17,7 @@ from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, Session
 from services.cocoindex_service import CocoIndexService
 from services.llm_service import LLMService
 from services.rag_service import RAGService
+from services.zip_validator import validate_zip
 
 # --- Database Setup ---
 engine = create_engine(settings.DATABASE_URL,
@@ -104,6 +105,16 @@ async def process_codebase_task(project_id: str, file_path: str):
     db = Session(bind=engine)
     try:
         extract_path = settings.UPLOAD_DIR / project_id
+
+        try:
+            validate_zip(file_path, str(extract_path))
+        except ValueError as e:
+            project = db.query(Project).filter(Project.id == project_id).first()
+            if project:
+                project.status = "error"
+                db.commit()
+            print(f"Zip validation failed for project {project_id}: {e}")
+            return   # stop here — don't extract
 
         # 1. Extract
         with zipfile.ZipFile(file_path, 'r') as zip_ref:
