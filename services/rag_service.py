@@ -6,13 +6,13 @@ class RAGService:
         self.llm = llm_service
         self.db = db_session
 
-    async def process_query(self, project_id: str, query: str, session_id: str, selected_files: list[str] = None):
+    async def process_query(self, project_id: str, query: str, session_id: str, selected_files: list[str] = None, top_k: int = 10):
         # 1. Retrieve (Mocked call - assumes you implement the vector query here)
         relevant_code = await self.cocoindex.search_relevant_code(
             project_id=project_id, 
             query=query, 
             db_session=self.db,
-            top_k=10
+            top_k=top_k
         )
         
         # 2. Filter

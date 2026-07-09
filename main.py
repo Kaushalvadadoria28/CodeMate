@@ -199,7 +199,8 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
         project_id=request.project_id,
         query=request.message,
         session_id=request.session_id,
-        selected_files=request.selected_files
+        selected_files=request.selected_files,
+        top_k=request.top_k 
     )
     return APIResponse(success=True, data=result)
 
