@@ -10,10 +10,12 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine
+from typing import List, Optional
 
 from config import settings
-from models.database import Base, Project, ChatSession, CodeEmbedding, Message
-from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse
+from models.database import Base, Project, ChatSession, CodeEmbedding, Message, CodeSymbol, CodeEdge
+from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse
+from services.ast_service import ASTIndexerService 
 from services.cocoindex_service import CocoIndexService
 from services.llm_service import LLMService
 from services.rag_service import RAGService
@@ -39,6 +41,7 @@ def get_db():
 
 # --- Service Initialization ---
 coco_service = CocoIndexService()
+ast_service = ASTIndexerService()
 llm_service = LLMService(
     api_key=settings.GEMINI_API_KEY,
     model_name=settings.GEMINI_MODEL
@@ -153,6 +156,27 @@ async def process_codebase_task(project_id: str, file_path: str):
         # 3. Index with CocoIndex
         await coco_service.index_codebase(project_id, str(extract_path))
 
+        # build AST context map. Non-fatal — chat still
+        # works via vector search alone if this fails.
+        try:
+            symbol_rows, edge_rows = await asyncio.to_thread(
+                ast_service.parse_codebase, project_id, str(extract_path)
+            )
+            if symbol_rows:
+                db.bulk_insert_mappings(CodeSymbol, symbol_rows)
+            if edge_rows:
+                from sqlalchemy.dialects.postgresql import insert as pg_insert
+                stmt = pg_insert(CodeEdge).values(edge_rows).on_conflict_do_nothing(
+                    index_elements=["project_id", "source_file", "target_file",
+                                     "edge_type", "source_symbol", "target_symbol"]
+                )
+                db.execute(stmt)
+            db.commit()
+            print(f"AST indexing complete for {project_id}: {len(symbol_rows)} symbols, {len(edge_rows)} edges")
+        except Exception as ast_error:
+            db.rollback()
+            print(f"AST indexing failed for project {project_id} (non-fatal): {ast_error}")
+
         # 4. Finish
         if project:
             project.status = "ready"
@@ -233,7 +257,7 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     if project.status != "ready":
         raise ProjectNotReadyError(request.project_id, project.status)
 
-    rag_service = RAGService(coco_service, llm_service, db)
+    rag_service = RAGService(coco_service, llm_service, db, ast_service)
     result = await rag_service.process_query(
         project_id=request.project_id,
         query=request.message,
@@ -374,4 +398,47 @@ async def get_messages(
         has_more=(offset + limit) < total
     )
 
+    return APIResponse(success=True, data=data.model_dump())
+
+@app.get("/api/symbols/{project_id}", response_model=APIResponse)
+async def get_symbols(
+    project_id: str,
+    filename: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db)
+):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise ProjectNotFoundError(project_id)
+
+    query = db.query(CodeSymbol).filter(CodeSymbol.project_id == project_id)
+    if filename:
+        query = query.filter(CodeSymbol.filename == filename)
+
+    symbols = query.order_by(CodeSymbol.filename, CodeSymbol.start_line).all()
+
+    return APIResponse(
+        success=True,
+        data=[SymbolResponse.model_validate(s).model_dump() for s in symbols]
+    )
+
+
+@app.get("/api/context-map/{project_id}", response_model=APIResponse)
+async def get_context_map(
+    project_id: str,
+    filenames: List[str] = Query(..., description="Repeat this param per filename"),
+    db: Session = Depends(get_db)
+):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise ProjectNotFoundError(project_id)
+
+    context_map = ast_service.build_context_map(project_id, filenames, db)
+    edge_count = len(context_map.splitlines()) if context_map else 0
+
+    data = ContextMapResponse(
+        project_id=project_id,
+        filenames=filenames,
+        context_map=context_map,
+        edge_count=edge_count
+    )
     return APIResponse(success=True, data=data.model_dump())
