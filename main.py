@@ -13,7 +13,7 @@ from sqlalchemy import create_engine
 from typing import List, Optional
 
 from config import settings
-from models.database import Base, Project, ChatSession, CodeEmbedding, Message, CodeSymbol, CodeEdge
+from models.database import Base, Project, ChatSession, CodeEmbedding, Message, CodeSymbol, CodeEdge, ASTSkippedFile
 from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse
 from services.ast_service import ASTIndexerService 
 from services.cocoindex_service import CocoIndexService
@@ -159,7 +159,7 @@ async def process_codebase_task(project_id: str, file_path: str):
         # build AST context map. Non-fatal — chat still
         # works via vector search alone if this fails.
         try:
-            symbol_rows, edge_rows = await asyncio.to_thread(
+            symbol_rows, edge_rows, skipped_files  = await asyncio.to_thread(
                 ast_service.parse_codebase, project_id, str(extract_path)
             )
             if symbol_rows:
@@ -171,8 +171,15 @@ async def process_codebase_task(project_id: str, file_path: str):
                                      "edge_type", "source_symbol", "target_symbol"]
                 )
                 db.execute(stmt)
+            if skipped_files:
+                skipped_rows = [
+                    {"id": str(uuid.uuid4()), "project_id": project_id, **sf}
+                    for sf in skipped_files
+                ]
+                db.bulk_insert_mappings(ASTSkippedFile, skipped_rows)
             db.commit()
-            print(f"AST indexing complete for {project_id}: {len(symbol_rows)} symbols, {len(edge_rows)} edges")
+            print(f"AST indexing complete for {project_id}: {len(symbol_rows)} symbols, "
+                  f"{len(edge_rows)} edges, {len(skipped_files)} file(s) skipped")
         except Exception as ast_error:
             db.rollback()
             print(f"AST indexing failed for project {project_id} (non-fatal): {ast_error}")
@@ -244,9 +251,13 @@ async def get_indexing_status(project_id: str, db: Session = Depends(get_db)):
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    skipped = db.query(ASTSkippedFile).filter(ASTSkippedFile.project_id == project_id).all()
+    
     return APIResponse(success=True, data={
         "status": project.status,
-        "files_count": project.files_count
+        "files_count": project.files_count,
+        "ast_skipped_files": [{"filename": s.filename, "reason": s.reason} for s in skipped]
     })
 
 @app.post("/api/chat", response_model=APIResponse)

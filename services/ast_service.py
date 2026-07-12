@@ -203,22 +203,28 @@ class ASTIndexerService:
 
         return module_map
 
-    def parse_codebase(self, project_id: str, codebase_path: str) -> tuple[list[dict], list[dict]]:
-        """Returns (symbol_rows, edge_rows) ready for bulk insert.
-        Skips unparsable files rather than failing the whole run."""
+    def parse_codebase(self, project_id: str, codebase_path: str) -> tuple[list[dict], list[dict], list[dict]]:
+        """Returns (symbol_rows, edge_rows, skipped_files).
+        skipped_files is a list of {"filename": str, "reason": str} for
+        files that failed to parse — surfaced to the API so upload results
+        aren't silently thinner than the actual codebase."""
         module_map = self.build_module_map(codebase_path)
         base = Path(codebase_path)
 
         symbol_rows: list[dict] = []
         edge_rows: list[dict] = []
         seen_edges: set[tuple] = set()
+        skipped_files: list[dict] = []
 
         for dotted_module, rel_path in module_map.items():
             abs_path = base / rel_path
             try:
                 source = abs_path.read_text(encoding="utf-8", errors="ignore")
                 tree = ast.parse(source, filename=rel_path)
-            except (SyntaxError, UnicodeDecodeError, ValueError):
+            except (SyntaxError, UnicodeDecodeError, ValueError) as e:
+                reason = f"{type(e).__name__}: {e}"
+                print(f"AST parse skipped for {rel_path}: {reason}")
+                skipped_files.append({"filename": rel_path, "reason": reason})
                 continue
 
             sym_visitor = _SymbolVisitor(project_id, rel_path)
@@ -228,11 +234,10 @@ class ASTIndexerService:
 
             imp_visitor = _ImportVisitor(project_id, rel_path, dotted_module, module_map)
             imp_visitor.visit(tree)
-            # edge_rows.extend(imp_visitor.edges)
 
             call_visitor = _CallVisitor(project_id, rel_path, local_symbol_names, imp_visitor.resolved_imports)
             call_visitor.visit(tree)
-            
+
             for edge in imp_visitor.edges + call_visitor.edges:
                 key = (
                     edge["source_file"], edge["target_file"], edge["edge_type"],
@@ -243,7 +248,7 @@ class ASTIndexerService:
                 seen_edges.add(key)
                 edge_rows.append(edge) 
 
-        return symbol_rows, edge_rows
+        return symbol_rows, edge_rows, skipped_files
 
     def build_context_map(self, project_id: str, filenames: list[str], db_session, hop_limit: int = 30) -> str:
         """1-hop neighbor lookup for a set of files, rendered as compact

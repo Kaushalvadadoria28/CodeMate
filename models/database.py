@@ -88,3 +88,11 @@ class CodeEdge(Base):
             "source_symbol", "target_symbol", name="uq_edge"
         ),
     )
+
+class ASTSkippedFile(Base):
+    __tablename__ = "ast_skipped_files"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    project_id = Column(String, ForeignKey("projects.id"), nullable=False, index=True)
+    filename = Column(String, nullable=False)
+    reason = Column(Text, nullable=False)
