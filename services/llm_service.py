@@ -29,7 +29,8 @@ class LLMService:
         self,
         query: str,
         context_code: list[dict],
-        conversation_history: list[dict]
+        conversation_history: list[dict],
+        context_map: str = ""
     ):
         system_instruction = """You are an expert coding assistant with deep knowledge of multiple programming languages.
         You have access to the user's codebase and must provide accurate answers based on the provided context.
@@ -42,6 +43,15 @@ class LLMService:
         """
 
         context_str = self._format_context(context_code)
+
+        # about cross-file relationships instead of guessing from code text alone.
+        context_map_block = (
+            f"\n\nCODE CONTEXT MAP (actual import/call relationships extracted via "
+            f"static analysis — treat this as ground truth for cross-file impact, "
+            f"do not infer connections that aren't listed here):\n{context_map}"
+            if context_map else ""
+        )
+        
         full_system_prompt = f"{system_instruction}\n\nCODE CONTEXT:\n{context_str}"
 
         history = []

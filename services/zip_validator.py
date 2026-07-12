@@ -11,10 +11,29 @@ ALLOWED_EXTENSIONS = {
     ".html", ".css", ".env", ".toml", ".cfg", ".ini"
 }
 
-def validate_zip(zip_path: str, extract_to: str):
+# Directories whose contents should never be extracted, regardless of
+# extension — build artifacts and caches, not source.
+EXCLUDED_DIR_SEGMENTS = {"__pycache__", ".git", "node_modules", "venv", ".venv", "dist", "build"}
+
+
+def _is_in_excluded_dir(filename: str) -> bool:
+    parts = filename.replace("\\", "/").split("/")
+    return any(p in EXCLUDED_DIR_SEGMENTS for p in parts)
+
+
+def validate_zip(zip_path: str, extract_to: str) -> list[str]:
     """
-    Validates zip file before extraction.
-    Raises ValueError if any check fails.
+    Validates zip file before extraction and returns the list of member
+    names that are safe to extract.
+
+    Hard-fails the whole upload (raises ValueError) for structural risks:
+    file count, uncompressed size, path traversal — these indicate a
+    malicious or corrupt archive, not just an irrelevant file.
+
+    Disallowed-extension files and excluded directories (__pycache__, .git,
+    node_modules, etc.) are silently excluded from the returned list rather
+    than failing the upload — one stray .log or .pyc file in an otherwise
+    valid codebase should not block indexing.
     """
     with zipfile.ZipFile(zip_path, 'r') as zf:
         entries = zf.infolist()
@@ -40,10 +59,26 @@ def validate_zip(zip_path: str, extract_to: str):
             if not target_path.startswith(real_extract_to + os.sep):
                 raise ValueError(f"Path traversal detected in zip entry: {entry.filename}")
 
-        # 4. extension allowlist — skip binaries and executables
+        # 4. extension allowlist + excluded dirs — skip, don't fail
+        safe_members = []
+        skipped = []
         for entry in entries:
             if entry.is_dir():
+                safe_members.append(entry.filename)
                 continue
+
+            if _is_in_excluded_dir(entry.filename):
+                skipped.append(entry.filename)
+                continue
+
             ext = os.path.splitext(entry.filename)[1].lower()
-            if ext and ext not in ALLOWED_EXTENSIONS:
-                raise ValueError(f"Disallowed file type in zip: {entry.filename}")
+            if not ext or ext in ALLOWED_EXTENSIONS:
+                safe_members.append(entry.filename)
+            else:
+                skipped.append(entry.filename)
+
+        if skipped:
+            print(f"Zip validation: skipping {len(skipped)} disallowed/excluded file(s): {skipped[:10]}"
+                  f"{' ...' if len(skipped) > 10 else ''}")
+
+        return safe_members

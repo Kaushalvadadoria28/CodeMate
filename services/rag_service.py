@@ -1,10 +1,11 @@
 import uuid
 
 class RAGService:
-    def __init__(self, cocoindex_service, llm_service, db_session):
+    def __init__(self, cocoindex_service, llm_service, db_session, ast_service=None):
         self.cocoindex = cocoindex_service
         self.llm = llm_service
         self.db = db_session
+        self.ast_service = ast_service
 
     async def process_query(self, project_id: str, query: str, session_id: str, selected_files: list[str] = None, top_k: int = 10):
         # 1. Retrieve (Mocked call - assumes you implement the vector query here)
@@ -18,6 +19,12 @@ class RAGService:
         # 2. Filter
         if selected_files:
             relevant_code = [c for c in relevant_code if c['filename'] in selected_files]
+
+        # being sent to the LLM, not from every file in the project.
+        context_map = ""
+        if self.ast_service and relevant_code:
+            filenames = list({c['filename'] for c in relevant_code})
+            context_map = self.ast_service.build_context_map(project_id, filenames, self.db)
             
         # 3. Get History
         history = self._get_conversation_history(session_id)
@@ -26,7 +33,8 @@ class RAGService:
         response_text = await self.llm.generate_response(
             query=query,
             context_code=relevant_code,
-            conversation_history=history
+            conversation_history=history,
+            context_map=context_map
         )
         
         # 5. Save
@@ -37,7 +45,8 @@ class RAGService:
         return {
             "response": response_text,
             "relevant_code": relevant_code,
-            "sources": [c['filename'] for c in relevant_code]
+            "sources": [c['filename'] for c in relevant_code],
+            "context_map": context_map
         }
 
     def _get_conversation_history(self, session_id: str, max_messages: int = 20):
