@@ -38,5 +38,6 @@ Thumbs.db
 *.swp
 alembic.ini
 requirements_copy.txt
-CODEBASE_CONTEXT.md
+CODEMATE_CONTEXT_PHASE5_COMPLETE.md
 exp.py
+CLAUDE.md

@@ -22,33 +22,56 @@ from sqlalchemy import or_
 
 
 class _SymbolVisitor(ast.NodeVisitor):
-    """Extracts function/class/method definitions from a single file's AST."""
+    """Extracts function/class/method definitions from a single file's AST.
+
+    Also captures top-level (module- or class-body-scope) variable
+    assignments as "variable" symbols — e.g. `agent = Agent(...)` — since
+    declarative-style code defines no def/class but is still a meaningful
+    unit other phases (dead-code detection, onboarding gen) need to see.
+    Function-local assignments are deliberately excluded (tracked via
+    `_func_depth`) to avoid flooding the table with local variable noise.
+    """
 
     def __init__(self, project_id: str, rel_path: str):
         self.project_id = project_id
         self.rel_path = rel_path
         self.symbols: list[dict] = []
         self._class_stack: list[str] = []
+        self._func_depth = 0
 
     def visit_ClassDef(self, node: ast.ClassDef):
-        self.symbols.append(self._row(node, "class"))
+        self.symbols.append(self._row(node.name, "class", node))
         self._class_stack.append(node.name)
         self.generic_visit(node)
         self._class_stack.pop()
 
     def visit_FunctionDef(self, node):
         symbol_type = "method" if self._class_stack else "function"
-        self.symbols.append(self._row(node, symbol_type))
+        self.symbols.append(self._row(node.name, symbol_type, node))
+        self._func_depth += 1
         self.generic_visit(node)
+        self._func_depth -= 1
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
-    def _row(self, node, symbol_type: str) -> dict:
+    def visit_Assign(self, node: ast.Assign):
+        if self._func_depth == 0:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self.symbols.append(self._row(target.id, "variable", node))
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign):
+        if self._func_depth == 0 and isinstance(node.target, ast.Name):
+            self.symbols.append(self._row(node.target.id, "variable", node))
+        self.generic_visit(node)
+
+    def _row(self, symbol_name: str, symbol_type: str, node) -> dict:
         return {
             "id": str(uuid4()),
             "project_id": self.project_id,
             "filename": self.rel_path,
-            "symbol_name": node.name,
+            "symbol_name": symbol_name,
             "symbol_type": symbol_type,
             "start_line": node.lineno,
             "end_line": getattr(node, "end_lineno", node.lineno),
