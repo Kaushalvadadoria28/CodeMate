@@ -132,7 +132,7 @@ async def process_codebase_task(project_id: str, file_path: str):
         extract_path = settings.UPLOAD_DIR / project_id
 
         try:
-            validate_zip(file_path, str(extract_path))
+            safe_members = validate_zip(file_path, str(extract_path))
         except ValueError as e:
             project = db.query(Project).filter(Project.id == project_id).first()
             if project:
@@ -143,7 +143,7 @@ async def process_codebase_task(project_id: str, file_path: str):
 
         # 1. Extract
         with zipfile.ZipFile(file_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_path)
+            zip_ref.extractall(extract_path, members=safe_members)
 
         # 2. Update DB Stats
         file_count = sum([len(files) for r, d, files in os.walk(extract_path)])
