@@ -84,3 +84,21 @@ class ContextMapResponse(BaseModel):
     filenames: List[str]
     context_map: str
     edge_count: int
+
+class OrphanSymbolResponse(BaseModel):
+    filename: str
+    symbol_name: str
+    symbol_type: str
+    start_line: int
+    end_line: int
+
+    class Config:
+        from_attributes = True
+
+
+class OrphanReportResponse(BaseModel):
+    project_id: str
+    total_symbols: int
+    excluded_count: int
+    orphan_count: int
+    orphans: List[OrphanSymbolResponse]

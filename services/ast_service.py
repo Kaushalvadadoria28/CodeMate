@@ -310,3 +310,47 @@ class ASTIndexerService:
                 lines.append(f"{caller} calls {e.target_symbol} in {e.target_file}")
 
         return "\n".join(lines)
+
+    def find_orphan_symbols(self, project_id: str, db_session, include_dunder: bool = False) -> dict:
+        """Symbols with zero inbound CodeEdge references — candidates for
+        dead/orphaned code. Heuristic, not certain: misses symbols only
+        reached via dynamic/reflective access (getattr, decorator
+        registration) or via cross-file method calls on class instances,
+        since call resolution here is name-based (see Phase 5 design notes).
+        Dunder methods (__init__, __str__, ...) are excluded by default —
+        they're invoked implicitly by the Python runtime, not via explicit
+        calls, so they'd otherwise always look orphaned."""
+        from models.database import CodeSymbol, CodeEdge
+
+        symbols = (
+            db_session.query(CodeSymbol)
+            .filter(CodeSymbol.project_id == project_id)
+            .all()
+        )
+        total_symbols = len(symbols)
+
+        if not include_dunder:
+            symbols = [
+                s for s in symbols
+                if not (s.symbol_name.startswith("__") and s.symbol_name.endswith("__"))
+            ]
+        excluded_count = total_symbols - len(symbols)
+
+        referenced = set(
+            db_session.query(CodeEdge.target_file, CodeEdge.target_symbol)
+            .filter(
+                CodeEdge.project_id == project_id,
+                CodeEdge.target_file.isnot(None),
+                CodeEdge.target_symbol.isnot(None),
+            )
+            .distinct()
+            .all()
+        )
+
+        orphans = [s for s in symbols if (s.filename, s.symbol_name) not in referenced]
+
+        return {
+            "orphans": orphans,
+            "total_symbols": total_symbols,
+            "excluded_count": excluded_count,
+        }
