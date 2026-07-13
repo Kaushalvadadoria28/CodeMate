@@ -14,7 +14,7 @@ from typing import List, Optional
 
 from config import settings
 from models.database import Base, Project, ChatSession, CodeEmbedding, Message, CodeSymbol, CodeEdge, ASTSkippedFile
-from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse
+from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse, OrphanSymbolResponse, OrphanReportResponse
 from services.ast_service import ASTIndexerService 
 from services.cocoindex_service import CocoIndexService
 from services.llm_service import LLMService
@@ -451,5 +451,29 @@ async def get_context_map(
         filenames=filenames,
         context_map=context_map,
         edge_count=edge_count
+    )
+    return APIResponse(success=True, data=data.model_dump())
+
+@app.get("/api/orphans/{project_id}", response_model=APIResponse)
+async def get_orphan_symbols(
+    project_id: str,
+    include_dunder: bool = Query(
+        default=False,
+        description="Include dunder methods (__init__, __str__, ...) — excluded by default since they're invoked implicitly by the runtime, not via explicit calls"
+    ),
+    db: Session = Depends(get_db)
+):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise ProjectNotFoundError(project_id)
+
+    result = ast_service.find_orphan_symbols(project_id, db, include_dunder=include_dunder)
+
+    data = OrphanReportResponse(    
+        project_id=project_id,
+        total_symbols=result["total_symbols"],
+        excluded_count=result["excluded_count"],
+        orphan_count=len(result["orphans"]),
+        orphans=[OrphanSymbolResponse.model_validate(s) for s in result["orphans"]]
     )
     return APIResponse(success=True, data=data.model_dump())
