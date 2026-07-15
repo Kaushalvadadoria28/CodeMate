@@ -12,8 +12,6 @@ ENV/
 
 # --- Environment Secrets ---
 .env
-.env
-.env.*
 
 # --- Databases ---
 *.sqlite3

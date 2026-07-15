@@ -109,3 +109,37 @@ class LLMService:
                 f"```{chunk.get('language', 'text')}\n{chunk.get('code_text')}\n```\n"
             )
         return "\n".join(formatted)
+
+    async def generate_document(self, prompt: str) -> str:
+        return await self._send_document_with_retry(prompt)
+
+    @retry(
+        retry=retry_if_exception_type(errors.ServerError),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
+    async def _send_document_with_retry(self, prompt: str):
+        try:
+            response = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=GenerateContentConfig(temperature=0.3),
+            )
+            return response.text
+
+        except errors.ServerError as e:
+            if e.code in (503, 429):
+                logger.warning(f"Gemini returned {e.code}, will retry...")
+                raise
+            raise HTTPException(
+                status_code=500,
+                detail=f"Google API Server Error: {str(e)}"
+            )
+
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unexpected error communicating with AI: {str(e)}"
+            )

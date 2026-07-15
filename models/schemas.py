@@ -102,3 +102,25 @@ class OrphanReportResponse(BaseModel):
     excluded_count: int
     orphan_count: int
     orphans: List[OrphanSymbolResponse]
+
+
+class DependencyInfo(BaseModel):
+    ecosystem: str
+    name: str
+    version: Optional[str] = None
+
+
+class VulnerabilityInfo(BaseModel):
+    package: str
+    ecosystem: str
+    version: Optional[str] = None
+    vulnerability_id: str
+    summary: Optional[str] = None
+
+
+class OnboardingResponse(BaseModel):
+    project_id: str
+    architecture_doc: str
+    dependencies: List[DependencyInfo]
+    vulnerabilities: List[VulnerabilityInfo]
+    vulnerability_scan_degraded: bool

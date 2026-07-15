@@ -14,11 +14,12 @@ from typing import List, Optional
 
 from config import settings
 from models.database import Base, Project, ChatSession, CodeEmbedding, Message, CodeSymbol, CodeEdge, ASTSkippedFile
-from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse, OrphanSymbolResponse, OrphanReportResponse
+from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse, OrphanSymbolResponse, OrphanReportResponse, DependencyInfo, VulnerabilityInfo, OnboardingResponse
 from services.ast_service import ASTIndexerService 
 from services.cocoindex_service import CocoIndexService
 from services.llm_service import LLMService
 from services.rag_service import RAGService
+from services.onboarding_service import OnboardingService
 from services.zip_validator import validate_zip
 from exceptions import ProjectNotFoundError, SessionNotFoundError, ProjectNotReadyError
 
@@ -42,6 +43,7 @@ def get_db():
 # --- Service Initialization ---
 coco_service = CocoIndexService()
 ast_service = ASTIndexerService()
+onboarding_service = OnboardingService()
 llm_service = LLMService(
     api_key=settings.GEMINI_API_KEY,
     model_name=settings.GEMINI_MODEL
@@ -475,5 +477,36 @@ async def get_orphan_symbols(
         excluded_count=result["excluded_count"],
         orphan_count=len(result["orphans"]),
         orphans=[OrphanSymbolResponse.model_validate(s) for s in result["orphans"]]
+    )
+    return APIResponse(success=True, data=data.model_dump())
+
+@app.get("/api/onboarding/{project_id}", response_model=APIResponse)
+async def get_onboarding_doc(project_id: str, db: Session = Depends(get_db)):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise ProjectNotFoundError(project_id)
+    if project.status != "ready":
+        raise ProjectNotReadyError(project_id, project.status)
+
+    codebase_path = settings.UPLOAD_DIR / project_id
+    result = await onboarding_service.generate_architecture_doc(
+        project_id, str(codebase_path), db, llm_service
+    )
+
+    dependencies = [
+        DependencyInfo(ecosystem="PyPI", name=name, version=version)
+        for name, version in result["dependencies"]["pypi"].items()
+    ] + [
+        DependencyInfo(ecosystem="npm", name=name, version=version)
+        for name, version in result["dependencies"]["npm"].items()
+    ]
+    vulnerabilities = [VulnerabilityInfo(**v) for v in result["vulnerabilities"]]
+
+    data = OnboardingResponse(
+        project_id=project_id,
+        architecture_doc=result["architecture_doc"],
+        dependencies=dependencies,
+        vulnerabilities=vulnerabilities,
+        vulnerability_scan_degraded=result["vulnerability_scan_degraded"],
     )
     return APIResponse(success=True, data=data.model_dump())
