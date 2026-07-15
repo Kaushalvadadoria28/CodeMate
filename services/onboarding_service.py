@@ -7,7 +7,7 @@ and bundles a non-fatal CVE scan of declared dependencies via OSV.dev's
 public batch API.
 """
 
-
+import asyncio
 import json
 import os
 import re
@@ -18,6 +18,7 @@ import httpx
 from services.ast_service import ASTIndexerService
 
 OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
+OSV_VULN_URL = "https://api.osv.dev/v1/vulns"
 
 
 class OnboardingService:
@@ -69,7 +70,12 @@ class OnboardingService:
 
     async def scan_vulnerabilities(self, manifests: dict, timeout: float = 10.0) -> tuple[list[dict], bool]:
         """Non-fatal: network/API failures degrade to an empty result
-        rather than blocking onboarding doc generation."""
+        rather than blocking onboarding doc generation.
+
+        querybatch only returns {id, modified} per vuln by design — a
+        second round of requests against GET /v1/vulns/{id} is required
+        to get summary/details, so we fetch those concurrently for every
+        unique ID found."""
         queries = []
         for ecosystem, packages in manifests.items():
             osv_ecosystem = "PyPI" if ecosystem == "pypi" else "npm"
@@ -87,6 +93,23 @@ class OnboardingService:
                 response = await client.post(OSV_BATCH_URL, json={"queries": queries})
                 response.raise_for_status()
                 results = response.json().get("results", [])
+
+                vuln_ids = {
+                    vuln["id"]
+                    for result in results
+                    for vuln in result.get("vulns", [])
+                    if vuln.get("id")
+                }
+
+                detail_by_id = {}
+                if vuln_ids:
+                    detail_responses = await asyncio.gather(
+                        *(client.get(f"{OSV_VULN_URL}/{vid}") for vid in vuln_ids),
+                        return_exceptions=True,
+                    )
+                    for vid, resp in zip(vuln_ids, detail_responses):
+                        if isinstance(resp, httpx.Response) and resp.status_code == 200:
+                            detail_by_id[vid] = resp.json()
         except Exception as e:
             print(f"CVE scan failed (non-fatal): {e}")
             return [], True
@@ -94,16 +117,18 @@ class OnboardingService:
         vulnerabilities = []
         for query, result in zip(queries, results):
             for vuln in result.get("vulns", []):
+                full = detail_by_id.get(vuln.get("id"), {})
+                summary = full.get("summary") or (full.get("details") or "")[:200] or None
                 vulnerabilities.append({
                     "package": query["package"]["name"],
                     "ecosystem": query["package"]["ecosystem"],
                     "version": query.get("version"),
                     "vulnerability_id": vuln.get("id"),
-                    "summary": vuln.get("summary"),
+                    "summary": summary,
                 })
 
         return vulnerabilities, False
-
+        
     async def generate_architecture_doc(self, project_id: str, codebase_path: str, db_session, llm_service) -> dict:
         from models.database import CodeSymbol
 
