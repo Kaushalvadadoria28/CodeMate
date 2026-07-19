@@ -124,3 +124,10 @@ class OnboardingResponse(BaseModel):
     dependencies: List[DependencyInfo]
     vulnerabilities: List[VulnerabilityInfo]
     vulnerability_scan_degraded: bool
+
+
+class BlastRadiusResponse(BaseModel):
+    project_id: str
+    filename: str
+    symbol_name: str
+    impact_report: str
