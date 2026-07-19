@@ -14,14 +14,16 @@ from typing import List, Optional
 
 from config import settings
 from models.database import Base, Project, ChatSession, CodeEmbedding, Message, CodeSymbol, CodeEdge, ASTSkippedFile
-from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse, OrphanSymbolResponse, OrphanReportResponse, DependencyInfo, VulnerabilityInfo, OnboardingResponse
+from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse, OrphanSymbolResponse, OrphanReportResponse, DependencyInfo, VulnerabilityInfo, OnboardingResponse, BlastRadiusResponse
 from services.ast_service import ASTIndexerService 
 from services.cocoindex_service import CocoIndexService
 from services.llm_service import LLMService
 from services.rag_service import RAGService
 from services.onboarding_service import OnboardingService
 from services.zip_validator import validate_zip
-from exceptions import ProjectNotFoundError, SessionNotFoundError, ProjectNotReadyError
+from exceptions import ProjectNotFoundError, SessionNotFoundError, ProjectNotReadyError, SymbolNotFoundError
+from services.blast_radius_service import BlastRadiusService
+
 
 # --- Database Setup ---
 engine = create_engine(settings.DATABASE_URL,
@@ -44,6 +46,7 @@ def get_db():
 coco_service = CocoIndexService()
 ast_service = ASTIndexerService()
 onboarding_service = OnboardingService()
+blast_radius_service = BlastRadiusService()
 llm_service = LLMService(
     api_key=settings.GEMINI_API_KEY,
     model_name=settings.GEMINI_MODEL
@@ -122,6 +125,13 @@ async def session_not_found_handler(request: Request, exc: SessionNotFoundError)
 async def project_not_ready_handler(request: Request, exc: ProjectNotReadyError):
     return JSONResponse(
         status_code=409,
+        content={"success": False, "data": None, "error": str(exc)}
+    )
+
+@app.exception_handler(SymbolNotFoundError)
+async def symbol_not_found_handler(request: Request, exc: SymbolNotFoundError):
+    return JSONResponse(
+        status_code=404,
         content={"success": False, "data": None, "error": str(exc)}
     )
 
@@ -508,5 +518,43 @@ async def get_onboarding_doc(project_id: str, db: Session = Depends(get_db)):
         dependencies=dependencies,
         vulnerabilities=vulnerabilities,
         vulnerability_scan_degraded=result["vulnerability_scan_degraded"],
+    )
+    return APIResponse(success=True, data=data.model_dump())
+
+@app.get("/api/blast-radius/{project_id}", response_model=APIResponse)
+async def get_blast_radius(
+    project_id: str,
+    filename: str = Query(..., description="File containing the target symbol"),
+    symbol_name: str = Query(..., description="Symbol to analyze the downstream impact of"),
+    max_hops: int = Query(default=5, ge=1, le=10),
+    db: Session = Depends(get_db)
+):
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise ProjectNotFoundError(project_id)
+    if project.status != "ready":
+        raise ProjectNotReadyError(project_id, project.status)
+
+    symbol_exists = (
+        db.query(CodeSymbol)
+        .filter(
+            CodeSymbol.project_id == project_id,
+            CodeSymbol.filename == filename,
+            CodeSymbol.symbol_name == symbol_name,
+        )
+        .first()
+    )
+    if not symbol_exists:
+        raise SymbolNotFoundError(project_id, filename, symbol_name)
+
+    impact_report = await blast_radius_service.generate_blast_radius(
+        project_id, filename, symbol_name, db, llm_service, max_hops=max_hops
+    )
+
+    data = BlastRadiusResponse(
+        project_id=project_id,
+        filename=filename,
+        symbol_name=symbol_name,
+        impact_report=impact_report,
     )
     return APIResponse(success=True, data=data.model_dump())

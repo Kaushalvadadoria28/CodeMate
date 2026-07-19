@@ -1,5 +1,5 @@
 from google import genai
-from google.genai.types import Part, UserContent, ModelContent, GenerateContentConfig
+from google.genai.types import Part, UserContent, ModelContent, GenerateContentConfig, AutomaticFunctionCallingConfig
 from google.genai import errors
 
 from fastapi import HTTPException
@@ -126,6 +126,46 @@ class LLMService:
                 model=self.model_name,
                 contents=prompt,
                 config=GenerateContentConfig(temperature=0.3),
+            )
+            return response.text
+
+        except errors.ServerError as e:
+            if e.code in (503, 429):
+                logger.warning(f"Gemini returned {e.code}, will retry...")
+                raise
+            raise HTTPException(
+                status_code=500,
+                detail=f"Google API Server Error: {str(e)}"
+            )
+
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unexpected error communicating with AI: {str(e)}"
+            )
+    
+    async def generate_with_tools(self, prompt: str, tools: list, max_remote_calls: int = 10) -> str:
+        return await self._send_tool_call_with_retry(prompt, tools, max_remote_calls)
+
+    @retry(
+        retry=retry_if_exception_type(errors.ServerError),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True
+    )
+    async def _send_tool_call_with_retry(self, prompt: str, tools: list, max_remote_calls: int):
+        try:
+            response = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=GenerateContentConfig(
+                    temperature=0.2,
+                    tools=tools,
+                    automatic_function_calling=AutomaticFunctionCallingConfig(
+                        maximum_remote_calls=max_remote_calls,
+                    ),
+                ),
             )
             return response.text
 

@@ -137,7 +137,14 @@ class _CallVisitor(ast.NodeVisitor):
     """Walks function bodies and records call sites that resolve to either
     a locally-defined symbol or an imported symbol. Unresolved calls
     (builtins, stdlib, untyped attribute access) are dropped rather than
-    stored — keeps the edge table signal-heavy instead of noisy."""
+    stored — keeps the edge table signal-heavy instead of noisy.
+
+    Also tracks simple local variable->class assignments (`obj = ClassName()`)
+    so obj.method() calls on instances of imported classes can resolve
+    cross-file — closes the gap flagged in Phase 5/6/7 docs where call
+    resolution was name-based only. Tracking is flat/unscoped (doesn't
+    distinguish function-local vs module-level variables of the same
+    name) — a deliberate, bounded heuristic, not full type inference."""
 
     def __init__(self, project_id: str, rel_path: str, local_symbols: set[str],
                  resolved_imports: dict[str, tuple[str, str | None]]):
@@ -147,6 +154,7 @@ class _CallVisitor(ast.NodeVisitor):
         self.resolved_imports = resolved_imports
         self.edges: list[dict] = []
         self._func_stack: list[str] = []
+        self._variable_types: dict[str, str] = {}
 
     def visit_FunctionDef(self, node):
         self._func_stack.append(node.name)
@@ -155,19 +163,60 @@ class _CallVisitor(ast.NodeVisitor):
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
-    def visit_Call(self, node: ast.Call):
-        called_name = self._resolve_call_name(node.func)
-        if called_name:
-            edge = self._try_build_edge(called_name)
-            if edge:
-                self.edges.append(edge)
+    def visit_Assign(self, node: ast.Assign):
+        class_name = self._constructor_class_name(node.value)
+        if class_name and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            self._variable_types[node.targets[0].id] = class_name
         self.generic_visit(node)
+
+    def _constructor_class_name(self, value) -> str | None:
+        """Returns the callee name if `value` is `ClassName(...)` and
+        ClassName is a known local or imported symbol — else None."""
+        if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name):
+            return None
+        name = value.func.id
+        if name in self.local_symbols or name in self.resolved_imports:
+            return name
+        return None
+
+    def visit_Call(self, node: ast.Call):
+        edge = self._resolve_instance_call(node.func) or self._resolve_plain_call(node.func)
+        if edge:
+            self.edges.append(edge)
+        self.generic_visit(node)
+
+    def _resolve_instance_call(self, func_node) -> dict | None:
+        """obj.method() where obj is a tracked instance of a known class —
+        resolves cross-file even when 'method' isn't itself a same-file
+        symbol name."""
+        if not isinstance(func_node, ast.Attribute) or not isinstance(func_node.value, ast.Name):
+            return None
+        class_name = self._variable_types.get(func_node.value.id)
+        if not class_name:
+            return None
+
+        method_name = func_node.attr
+        source_symbol = self._func_stack[-1] if self._func_stack else None
+        raw_ref = f"{func_node.value.id}.{method_name}"
+
+        if class_name in self.resolved_imports:
+            target_file, _ = self.resolved_imports[class_name]
+            return self._row(target_file, method_name, source_symbol, raw_ref)
+        if class_name in self.local_symbols:
+            return self._row(self.rel_path, method_name, source_symbol, raw_ref)
+        return None
+
+    def _resolve_plain_call(self, func_node) -> dict | None:
+        called_name = self._resolve_call_name(func_node)
+        if not called_name:
+            return None
+        return self._try_build_edge(called_name)
 
     def _resolve_call_name(self, func_node) -> str | None:
         if isinstance(func_node, ast.Name):
             return func_node.id
         if isinstance(func_node, ast.Attribute):
-            return func_node.attr  # self.method() -> "method", module.func() -> "func"
+            return func_node.attr
         return None
 
     def _try_build_edge(self, called_name: str) -> dict | None:
@@ -193,6 +242,7 @@ class _CallVisitor(ast.NodeVisitor):
             "target_symbol": target_symbol,
             "raw_reference": raw_reference,
         }
+
 
 
 class ASTIndexerService:
