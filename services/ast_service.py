@@ -83,17 +83,39 @@ class _ImportVisitor(ast.NodeVisitor):
     module map where possible. Also builds a local_name -> (file, symbol)
     map used later to resolve call sites in the same file."""
 
-    def __init__(self, project_id: str, rel_path: str, dotted_module: str, module_map: dict[str, str]):
+    def __init__(self, project_id: str, rel_path: str, dotted_module: str, module_map: dict[str, str],
+                 synthetic_prefix: str | None = None):
         self.project_id = project_id
         self.rel_path = rel_path
         self.dotted_module = dotted_module
         self.module_map = module_map
+        self.synthetic_prefix = synthetic_prefix
         self.edges: list[dict] = []
         self.resolved_imports: dict[str, tuple[str, str | None]] = {}
 
+    def _lookup(self, target_module: str | None) -> str | None:
+        """Looks up a dotted module path, falling back to prepending the
+        zip's synthetic wrapping-folder prefix if a plain lookup fails.
+
+        Absolute imports in the source (`from models.database import X`)
+        never include the name of whatever folder the zip happened to be
+        wrapped in — but build_module_map() computes dotted paths from the
+        full extracted path, so its keys DO include that prefix (e.g.
+        "CM.models.database"). Without this fallback, every absolute
+        import in a project zipped as a single wrapping folder (the
+        default behavior of most "compress to zip" tools) silently
+        resolves to target_file=None ("external"), even for genuinely
+        local modules."""
+        if not target_module:
+            return None
+        target_file = self.module_map.get(target_module)
+        if target_file is None and self.synthetic_prefix:
+            target_file = self.module_map.get(f"{self.synthetic_prefix}.{target_module}")
+        return target_file
+
     def visit_Import(self, node: ast.Import):
         for alias in node.names:
-            target_file = self.module_map.get(alias.name)
+            target_file = self._lookup(alias.name)
             local_name = alias.asname or alias.name.split(".")[0]
             self.edges.append(self._edge(target_file, None, alias.name))
             if target_file:
@@ -105,7 +127,7 @@ class _ImportVisitor(ast.NodeVisitor):
         else:
             target_module = node.module
 
-        target_file = self.module_map.get(target_module) if target_module else None
+        target_file = self._lookup(target_module)
 
         for alias in node.names:
             local_name = alias.asname or alias.name
@@ -276,12 +298,30 @@ class ASTIndexerService:
 
         return module_map
 
+    def detect_synthetic_prefix(self, module_map: dict[str, str]) -> str | None:
+        """Detects a single wrapping top-level directory shared by every
+        entry in module_map — the common case when a zip tool includes
+        the source folder itself as the zip's sole top-level entry (e.g.
+        "adk_mcp/agents/prompts.py", "CM/main.py"), rather than the
+        project's files sitting directly at the zip root. The real
+        codebase's absolute imports never reference this synthetic name,
+        so it must be tried as a fallback prefix — see
+        _ImportVisitor._lookup(). Returns None if there's no single
+        common top-level directory (multi-package upload, or files
+        already at the root)."""
+        top_level_dirs = {rel_path.split("/", 1)[0] for rel_path in module_map.values() if "/" in rel_path}
+        top_level_all = {rel_path.split("/", 1)[0] for rel_path in module_map.values()}
+        if len(top_level_all) == 1 and top_level_dirs == top_level_all:
+            return next(iter(top_level_all))
+        return None
+
     def parse_codebase(self, project_id: str, codebase_path: str) -> tuple[list[dict], list[dict], list[dict]]:
         """Returns (symbol_rows, edge_rows, skipped_files).
         skipped_files is a list of {"filename": str, "reason": str} for
         files that failed to parse — surfaced to the API so upload results
         aren't silently thinner than the actual codebase."""
         module_map = self.build_module_map(codebase_path)
+        synthetic_prefix = self.detect_synthetic_prefix(module_map)
         base = Path(codebase_path)
 
         symbol_rows: list[dict] = []
@@ -305,7 +345,7 @@ class ASTIndexerService:
             symbol_rows.extend(sym_visitor.symbols)
             local_symbol_names = {s["symbol_name"] for s in sym_visitor.symbols}
 
-            imp_visitor = _ImportVisitor(project_id, rel_path, dotted_module, module_map)
+            imp_visitor = _ImportVisitor(project_id, rel_path, dotted_module, module_map, synthetic_prefix)
             imp_visitor.visit(tree)
 
             call_visitor = _CallVisitor(project_id, rel_path, local_symbol_names, imp_visitor.resolved_imports)
