@@ -15,6 +15,23 @@ def determine_language(extension: str) -> str:
 def extract_extension(filename: str) -> str:
     return os.path.splitext(filename)[1]
 
+# Mirrors code_embedding_flow's LocalFile included_patterns/excluded_patterns
+# below — kept as plain extensions/dir names here since we're walking the
+# filesystem directly rather than going through CocoIndex's own source.
+_INDEXABLE_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".cpp", ".c", ".go", ".rs", ".md"}
+_EXCLUDED_DIRS = {"node_modules", "__pycache__", "venv", ".git", "dist", "build"}
+
+
+def _normalize_path(filename: str) -> str:
+    """CocoIndex's LocalFile source returns OS-native path separators —
+    backslashes on Windows. ast_service.py normalizes to forward-slash via
+    Path.as_posix(), so CodeEmbedding.filename and CodeSymbol/CodeEdge
+    filenames don't match on Windows unless normalized to the same form.
+    Discovered via find_indexing_gaps() flagging every file as "missing"
+    when they weren't — the real bug was this mismatch, not a CocoIndex
+    failure."""
+    return filename.replace("\\", "/")
+
 class CocoIndexService:
     def __init__(self):
         # Lazily loaded to avoid blocking startup
@@ -97,6 +114,39 @@ class CocoIndexService:
         await code_embedding_flow.update_async()
         return True
 
+    def find_indexing_gaps(self, project_id: str, codebase_path: str, db_session) -> list[str]:
+        """Returns relative filenames that exist on disk (matching the same
+        included_patterns/excluded_patterns as code_embedding_flow) but have
+        zero CodeEmbedding rows for this project.
+
+        CocoIndex writes directly to Postgres via its own Rust engine and
+        logs row-level failures internally without raising a Python
+        exception index_codebase() would propagate — so a project can
+        reach status="ready" with some files silently unindexed. This is a
+        best-effort, file-level check (not chunk-level): it can't detect a
+        file that got *some* but not all of its chunks embedded, only a
+        file with zero embedding rows at all."""
+        from models.database import CodeEmbedding
+
+        base = Path(codebase_path)
+        expected_files = set()
+        for root, dirs, files in os.walk(codebase_path):
+            dirs[:] = [d for d in dirs if d not in _EXCLUDED_DIRS and not d.startswith(".")]
+            for fname in files:
+                if os.path.splitext(fname)[1] in _INDEXABLE_EXTENSIONS:
+                    rel_path = (Path(root) / fname).relative_to(base).as_posix()
+                    expected_files.add(rel_path)
+
+        indexed_files = {
+            _normalize_path(row[0]) for row in
+            db_session.query(CodeEmbedding.filename)
+            .filter(CodeEmbedding.project_id == project_id)
+            .distinct()
+            .all()
+        }
+
+        return sorted(expected_files - indexed_files)
+
     async def search_relevant_code(self, project_id: str, query: str, db_session, top_k: int = 5):
         from models.database import CodeEmbedding
         import asyncio
@@ -115,7 +165,7 @@ class CocoIndexService:
 
         return [
             {
-                "filename": r.filename,
+                "filename": _normalize_path(r.filename),
                 "location": r.location,
                 "code_text": r.code_text,
                 "language": r.language
