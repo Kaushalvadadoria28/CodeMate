@@ -8,7 +8,10 @@ ALLOWED_EXTENSIONS = {
     ".py", ".js", ".jsx", ".ts", ".tsx",
     ".java", ".cpp", ".c", ".go", ".rs",
     ".md", ".txt", ".json", ".yaml", ".yml",
-    ".html", ".css", ".env", ".toml", ".cfg", ".ini"
+    ".html", ".css", ".toml", ".cfg", ".ini"
+    # .env deliberately excluded — uploaded .env files were previously
+    # extracted and potentially chunked/embedded by CocoIndex, risking
+    # secret leakage retrievable through chat. Do not re-add.
 }
 
 # Directories whose contents should never be extracted, regardless of

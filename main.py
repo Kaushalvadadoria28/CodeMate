@@ -13,7 +13,7 @@ from sqlalchemy import create_engine
 from typing import List, Optional
 
 from config import settings
-from models.database import Base, Project, ChatSession, CodeEmbedding, Message, CodeSymbol, CodeEdge, ASTSkippedFile
+from models.database import Base, Project, ChatSession, CodeEmbedding, Message, CodeSymbol, CodeEdge, ASTSkippedFile, EmbeddingSkippedFile
 from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse, OrphanSymbolResponse, OrphanReportResponse, DependencyInfo, VulnerabilityInfo, OnboardingResponse, BlastRadiusResponse
 from services.ast_service import ASTIndexerService 
 from services.cocoindex_service import CocoIndexService
@@ -33,7 +33,12 @@ engine = create_engine(settings.DATABASE_URL,
                         pool_timeout=30,       # seconds to wait for a connection before raising an error
                         pool_recycle=1800,     # recycle connections after 30 min (prevents stale connection errors
     )
-Base.metadata.create_all(bind=engine)
+
+# Dev convenience only — creates any model's table on startup, bypassing
+# Alembic entirely. Guarded so it can't silently drift production's
+# migration-tracked schema (see CODEMATE_CONTEXT_PHASE5_COMPLETE.md §7.4).
+if settings.ENVIRONMENT != "production":
+    Base.metadata.create_all(bind=engine)
 
 def get_db():
     db = Session(bind=engine)
@@ -168,6 +173,30 @@ async def process_codebase_task(project_id: str, file_path: str):
         # 3. Index with CocoIndex
         await coco_service.index_codebase(project_id, str(extract_path))
 
+        # Detect files CocoIndex silently failed to embed. Non-fatal —
+        # informational only, surfaced via GET /api/indexing-status.
+        try:
+            gaps = await asyncio.to_thread(
+                coco_service.find_indexing_gaps, project_id, str(extract_path), db
+            )
+            if gaps:
+                gap_rows = [
+                    {
+                        "id": str(uuid.uuid4()),
+                        "project_id": project_id,
+                        "filename": fname,
+                        "reason": "No embedding chunks found for this file after indexing — "
+                                  "CocoIndex may have silently failed to process it.",
+                    }
+                    for fname in gaps
+                ]
+                db.bulk_insert_mappings(EmbeddingSkippedFile, gap_rows)
+                db.commit()
+                print(f"Indexing gap check for {project_id}: {len(gaps)} file(s) have zero embeddings")
+        except Exception as gap_error:
+            db.rollback()
+            print(f"Indexing gap check failed for project {project_id} (non-fatal): {gap_error}")
+
         # build AST context map. Non-fatal — chat still
         # works via vector search alone if this fails.
         try:
@@ -265,11 +294,13 @@ async def get_indexing_status(project_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Project not found")
 
     skipped = db.query(ASTSkippedFile).filter(ASTSkippedFile.project_id == project_id).all()
-    
+    embedding_gaps = db.query(EmbeddingSkippedFile).filter(EmbeddingSkippedFile.project_id == project_id).all()
+
     return APIResponse(success=True, data={
         "status": project.status,
         "files_count": project.files_count,
-        "ast_skipped_files": [{"filename": s.filename, "reason": s.reason} for s in skipped]
+        "ast_skipped_files": [{"filename": s.filename, "reason": s.reason} for s in skipped],
+        "embedding_skipped_files": [{"filename": e.filename, "reason": e.reason} for e in embedding_gaps]
     })
 
 @app.post("/api/chat", response_model=APIResponse)

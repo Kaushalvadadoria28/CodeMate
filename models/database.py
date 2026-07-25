@@ -96,3 +96,18 @@ class ASTSkippedFile(Base):
     project_id = Column(String, ForeignKey("projects.id"), nullable=False, index=True)
     filename = Column(String, nullable=False)
     reason = Column(Text, nullable=False)
+
+
+class EmbeddingSkippedFile(Base):
+    """Files present in the extracted codebase (matching CocoIndex's
+    included_patterns) that ended up with zero CodeEmbedding rows —
+    CocoIndex writes directly to Postgres via its own Rust engine and can
+    silently drop a file's chunks without raising a Python exception.
+    `reason` is necessarily generic (CocoIndex doesn't surface per-file
+    error detail to Python), unlike ASTSkippedFile.reason."""
+    __tablename__ = "embedding_skipped_files"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    project_id = Column(String, ForeignKey("projects.id"), nullable=False, index=True)
+    filename = Column(String, nullable=False)
+    reason = Column(Text, nullable=False)
