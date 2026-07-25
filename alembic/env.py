@@ -31,6 +31,30 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from models.database import Base
 target_metadata = Base.metadata
 
+
+def include_object(object, name, type_, reflected, compare_to):
+    """Exclude CocoIndex-managed objects from autogenerate diffs. CocoIndex
+    writes directly to Postgres via its own Rust engine, bypassing the
+    SQLAlchemy ORM entirely — its setup-tracking table, per-project
+    tracking tables, and vector index all live outside Base.metadata.
+    Without this filter, every autogenerate run proposes dropping them.
+
+    Matches on "cocoindex" as a substring rather than the full expected
+    "__cocoindex_tracking" suffix — Postgres truncates identifiers to 63
+    bytes, so per-project tracking table names actually end up truncated
+    to something like "..._c6dfb87c...__cocoindex_t", not the full
+    suffix. An exact-suffix match silently failed to catch these; verified
+    against a real `alembic revision --autogenerate` diff before landing
+    on this broader match."""
+    if type_ == "table":
+        if name == "cocoindex_setup_metadata":
+            return False
+        if name and name.startswith("codeembedding_") and "cocoindex" in name:
+            return False
+    if type_ == "index" and name and "vector_cosine_ops" in name:
+        return False
+    return True
+
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
 # my_important_option = config.get_main_option("my_important_option")
@@ -55,6 +79,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -76,7 +101,9 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=include_object,
         )
 
         with context.begin_transaction():
