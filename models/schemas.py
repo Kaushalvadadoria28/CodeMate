@@ -131,3 +131,23 @@ class BlastRadiusResponse(BaseModel):
     filename: str
     symbol_name: str
     impact_report: str
+
+class ExplainTraceRequest(BaseModel):
+    project_id: str
+    traceback: str
+    max_hops: int = Field(default=5, ge=1, le=10)
+
+
+class ResolvedFrame(BaseModel):
+    filename: str
+    line: int
+    function: str
+    enclosing_symbol: Optional[str] = None
+    code_snippet: Optional[str] = None
+
+
+class ExplainTraceResponse(BaseModel):
+    project_id: str
+    explanation: str
+    resolved_frames: List[ResolvedFrame]
+    used_agentic_tools: bool
