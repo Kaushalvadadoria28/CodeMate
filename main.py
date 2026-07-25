@@ -33,7 +33,12 @@ engine = create_engine(settings.DATABASE_URL,
                         pool_timeout=30,       # seconds to wait for a connection before raising an error
                         pool_recycle=1800,     # recycle connections after 30 min (prevents stale connection errors
     )
-Base.metadata.create_all(bind=engine)
+
+# Dev convenience only — creates any model's table on startup, bypassing
+# Alembic entirely. Guarded so it can't silently drift production's
+# migration-tracked schema (see CODEMATE_CONTEXT_PHASE5_COMPLETE.md §7.4).
+if settings.ENVIRONMENT != "production":
+    Base.metadata.create_all(bind=engine)
 
 def get_db():
     db = Session(bind=engine)

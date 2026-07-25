@@ -6,9 +6,14 @@ from pathlib import Path
 load_dotenv()
 
 class Settings(BaseSettings):
+    # Environment ("development" or "production") — gates dev-only
+    # conveniences like Base.metadata.create_all() in main.py, which
+    # would otherwise bypass Alembic's migration tracking in production.
+    ENVIRONMENT: str = "development"
+
     # Database (Defaults to local usage)
     DATABASE_URL: str = "postgresql://postgres:Kaushal123@localhost:5432/coding_agent"
-    
+
     # Google Gemini API
     GEMINI_API_KEY: str
     GEMINI_MODEL: str = "gemini-1.5-flash" # or "gemini-1.5-pro"
