@@ -36,11 +36,27 @@ class CocoIndexService:
     def __init__(self):
         # Lazily loaded to avoid blocking startup
         self._embedder = None
+        self._pg_db_auth_ref = None
 
     def _get_embedder(self):
         if self._embedder is None:
             self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
         return self._embedder
+    
+    def _get_pg_db_auth_ref(self):
+        """CocoIndex's auth registry is process-global — add_auth_entry()
+        raises RuntimeError('Auth entry already exists') if called twice
+        with the same key in one process. Register once and reuse the
+        reference for every subsequent index_codebase() call instead of
+        re-registering per upload (discovered when a second upload in the
+        same running server process failed indexing with this exact error)."""
+        if self._pg_db_auth_ref is None:
+            self._pg_db_auth_ref = cocoindex.add_auth_entry(
+                "pg_db",
+                cocoindex.DatabaseConnectionSpec(url=settings.COCOINDEX_DATABASE_URL)
+            )
+        return self._pg_db_auth_ref
+
 
     async def index_codebase(self, project_id: str, codebase_path: str):
         """Index codebase using CocoIndex + Tree-sitter + Local Embeddings"""
@@ -93,12 +109,7 @@ class CocoIndexService:
                 "code_embeddings",
                 cocoindex.storages.Postgres(
                     table_name="code_embeddings",
-                    database=cocoindex.add_auth_entry(
-                        "pg_db",
-                        cocoindex.DatabaseConnectionSpec(
-                            url=settings.COCOINDEX_DATABASE_URL
-                        )
-                    )
+                    database=self._get_pg_db_auth_ref()
                 ),
                 primary_key_fields=["project_id", "filename", "location"],
                 vector_indexes=[

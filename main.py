@@ -14,7 +14,7 @@ from typing import List, Optional
 
 from config import settings
 from models.database import Base, Project, ChatSession, CodeEmbedding, Message, CodeSymbol, CodeEdge, ASTSkippedFile, EmbeddingSkippedFile
-from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse, OrphanSymbolResponse, OrphanReportResponse, DependencyInfo, VulnerabilityInfo, OnboardingResponse, BlastRadiusResponse
+from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse, OrphanSymbolResponse, OrphanReportResponse, DependencyInfo, VulnerabilityInfo, OnboardingResponse, BlastRadiusResponse, ExplainTraceRequest, ExplainTraceResponse, ResolvedFrame
 from services.ast_service import ASTIndexerService 
 from services.cocoindex_service import CocoIndexService
 from services.llm_service import LLMService
@@ -23,6 +23,7 @@ from services.onboarding_service import OnboardingService
 from services.zip_validator import validate_zip
 from exceptions import ProjectNotFoundError, SessionNotFoundError, ProjectNotReadyError, SymbolNotFoundError
 from services.blast_radius_service import BlastRadiusService
+from services.stack_trace_service import StackTraceExplainerService
 
 
 # --- Database Setup ---
@@ -52,6 +53,7 @@ coco_service = CocoIndexService()
 ast_service = ASTIndexerService()
 onboarding_service = OnboardingService()
 blast_radius_service = BlastRadiusService()
+stack_trace_service = StackTraceExplainerService()
 llm_service = LLMService(
     api_key=settings.GEMINI_API_KEY,
     model_name=settings.GEMINI_MODEL
@@ -587,5 +589,27 @@ async def get_blast_radius(
         filename=filename,
         symbol_name=symbol_name,
         impact_report=impact_report,
+    )
+    return APIResponse(success=True, data=data.model_dump())
+
+@app.post("/api/explain-trace", response_model=APIResponse)
+async def explain_trace(request: ExplainTraceRequest, db: Session = Depends(get_db)):
+    project = db.query(Project).filter(Project.id == request.project_id).first()
+    if not project:
+        raise ProjectNotFoundError(request.project_id)
+    if project.status != "ready":
+        raise ProjectNotReadyError(request.project_id, project.status)
+
+    codebase_path = settings.UPLOAD_DIR / request.project_id
+    result = await stack_trace_service.explain_trace(
+        request.project_id, request.traceback, str(codebase_path),
+        db, llm_service, max_hops=request.max_hops
+    )
+
+    data = ExplainTraceResponse(
+        project_id=request.project_id,
+        explanation=result["explanation"],
+        resolved_frames=[ResolvedFrame(**f) for f in result["resolved_frames"]],
+        used_agentic_tools=result["used_agentic_tools"],
     )
     return APIResponse(success=True, data=data.model_dump())

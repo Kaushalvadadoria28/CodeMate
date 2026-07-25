@@ -401,6 +401,28 @@ class ASTIndexerService:
 
         return "\n".join(lines)
 
+    def find_symbol_at_line(self, project_id: str, filename: str, line_number: int, db_session):
+        """Innermost CodeSymbol enclosing the given line in the given file,
+        or None if nothing's range contains it (e.g. line falls outside any
+        def/class, or a stale trace pointing past current EOF). Orders by
+        range size ascending so a nested method wins over its enclosing
+        class when both technically contain the line."""
+        from models.database import CodeSymbol
+
+        candidates = (
+            db_session.query(CodeSymbol)
+            .filter(
+                CodeSymbol.project_id == project_id,
+                CodeSymbol.filename == filename,
+                CodeSymbol.start_line <= line_number,
+                CodeSymbol.end_line >= line_number,
+            )
+            .all()
+        )
+        if not candidates:
+            return None
+        return min(candidates, key=lambda s: s.end_line - s.start_line)
+
     def find_orphan_symbols(self, project_id: str, db_session, include_dunder: bool = False) -> dict:
         """Symbols with zero inbound CodeEdge references — candidates for
         dead/orphaned code. Heuristic, not certain: misses symbols only
