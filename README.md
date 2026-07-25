@@ -9,19 +9,26 @@ Upload zip → background validate/extract → CocoIndex chunks + embeds code �
 ## Project Structure
 
 ```text
-├── models/                    # SQLAlchemy ORM models & Pydantic schemas
+├── alembic/                     # DB migrations (alembic.ini is gitignored — create locally)
+│   ├── env.py                  # include_object filter excludes CocoIndex-managed objects
+│   └── versions/
+├── models/                      # SQLAlchemy ORM models & Pydantic schemas
 │   ├── database.py
 │   └── schemas.py
-├── services/                  # Core business logic, one class per concern
-│   ├── cocoindex_service.py   # chunking + embedding + vector search
-│   ├── ast_service.py         # AST symbol/edge extraction, context map, orphan detection
-│   ├── llm_service.py         # Gemini client wrapper (tenacity retries)
-│   ├── rag_service.py         # orchestrator: vector search -> AST context -> LLM
-│   └── zip_validator.py       # upload safety checks
-├── exceptions.py               # domain exceptions (mapped to HTTP responses in main.py)
-├── main.py                     # FastAPI app, routes, background indexing task
-├── config.py                   # Pydantic settings (env vars, upload dir, Gemini config)
-├── create_db.py                # helper script to create the DB + enable the pgvector extension
+├── services/                    # Core business logic, one class per concern
+│   ├── cocoindex_service.py    # chunking + embedding + vector search
+│   ├── ast_service.py          # AST symbol/edge extraction, context map, orphan detection
+│   ├── llm_service.py          # Gemini client wrapper (tenacity retries)
+│   ├── rag_service.py          # orchestrator: vector search -> AST context -> LLM
+│   ├── onboarding_service.py   # architecture doc generation + bundled CVE scan
+│   ├── blast_radius_service.py # agentic downstream-impact analysis (get_callers/get_callees)
+│   ├── stack_trace_service.py  # traceback parsing + explanation, reuses graph_tools
+│   ├── graph_tools.py          # shared get_callers/get_callees factory
+│   └── zip_validator.py        # upload safety checks
+├── exceptions.py                # domain exceptions (mapped to HTTP responses in main.py)
+├── main.py                      # FastAPI app, routes, background indexing task
+├── config.py                    # Pydantic settings (env vars, upload dir, Gemini config)
+├── create_db.py                 # helper script to create the DB + enable the pgvector extension
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -86,6 +93,7 @@ There is currently no automated test suite, linter config, or CI pipeline — ev
 - **Automated Onboarding & Architecture Generation + CVE scan:** `GET /api/onboarding/{project_id}` builds a directory tree, parses `requirements.txt`/`package.json` into a dependency manifest, and generates a README-style architecture doc via Gemini grounded in the directory structure, dependencies, and AST symbol summary. Bundles a non-fatal CVE scan of declared dependencies against OSV.dev's public batch API (PyPI/npm) — degrades to an empty result with `vulnerability_scan_degraded: true` rather than failing the request if OSV.dev is unreachable. No new tables/migrations.
 - **Blast Radius Checker (Impact Analysis Agent):** `GET /api/blast-radius/{project_id}` gives Gemini two graph-query tools (`get_callers`/`get_callees`) via the `google-genai` SDK's Automatic Function Calling and lets it traverse the `CodeEdge` graph outward from a target symbol to produce a downstream-impact report. Also ships a scoped call-resolution improvement — simple `var = ClassName(...)` assignments are now tracked so `var.method()` calls on instances of imported classes resolve cross-file, closing a gap present since Phase 5. No new tables/migrations.
 - **Post-Phase-8 hardening pass:** fixed a Windows-specific path-separator mismatch between CocoIndex-written and AST-service-written filenames that had been silently returning an empty `context_map` from `/api/chat` since Phase 5, and a "synthetic wrapping folder" bug where zipping a project inside a top-level folder (the default behavior of most zip tools) broke resolution of every absolute import in the codebase. Both verified fixed against a real `/api/chat` call. Also added CocoIndex silent-row-failure detection (new `EmbeddingSkippedFile` table), an Alembic `include_object` filter so `autogenerate` stops proposing to drop CocoIndex-managed objects, gated `Base.metadata.create_all()` behind an `ENVIRONMENT` setting so it never runs in production, and removed `.env` from the upload allowlist.
+- **"Explain This Stack Trace" Mode:** `POST /api/explain-trace` parses a raw Python traceback, maps each frame to real code via the AST graph (progressive suffix-matching against stored filenames, since a traceback's paths come from whatever environment produced it), and asks Gemini to explain the failure — reusing the same `get_callers`/`get_callees` tool-calling as Blast Radius (now extracted into a shared `services/graph_tools.py`) so it can explore downstream impact. Handles `SyntaxError`/`IndentationError` frames (which omit the usual `, in <function>` suffix) and rejects basename-only file matches whose line number doesn't fit the candidate file, to avoid misattributing a frame to a same-named file in a third-party package. Frames that don't resolve to exactly one project file are silently dropped rather than erroring. No new tables/migrations.
 
 ## API Endpoints
 
@@ -102,6 +110,7 @@ There is currently no automated test suite, linter config, or CI pipeline — ev
 | GET | `/api/orphans/{project_id}` | Dead-code candidates; `?include_dunder=true` to include magic methods |
 | GET | `/api/onboarding/{project_id}` | Architecture doc + dependency list + bundled CVE scan; requires `status: "ready"` |
 | GET | `/api/blast-radius/{project_id}?filename=&symbol_name=&max_hops=` | Agentic downstream-impact report for a target symbol; requires `status: "ready"`; 404 if the symbol doesn't exist |
+| POST | `/api/explain-trace` | Body: `{project_id, traceback, max_hops}`; requires `status: "ready"`; returns `explanation`, `resolved_frames`, `used_agentic_tools` |
 
 All responses use the envelope `{ "success": bool, "data": ..., "error": ... }`. Domain errors (`ProjectNotFoundError`, `SessionNotFoundError`, `ProjectNotReadyError`) map to 404/404/409 respectively.
 
@@ -115,7 +124,5 @@ All responses use the envelope `{ "success": bool, "data": ..., "error": ... }`.
 - The Blast Radius report gives no visibility into how many tool calls the agent actually made — its conclusions are plausible and were verified correct against ground truth in testing, but aren't self-auditable from the API response alone.
 - Call resolution can't see a bare function *reference* passed as an argument (e.g. `asyncio.to_thread(some_func, ...)`, `executor.submit(...)`) — only direct `Call` nodes are tracked, so Blast Radius/orphan detection will miss real callers that invoke a symbol this way. Accepted as a documented heuristic limitation, not tracked as a bug.
 - `.env` files, silent CocoIndex embedding failures, and `Base.metadata.create_all()`'s Alembic drift risk were open items through Phase 8 — all fixed in the post-Phase-8 hardening pass above.
-
-## Roadmap
-
-Dead Code Detector (done) → Automated Onboarding/Architecture Doc Generation + CVE scan (done) → Blast Radius / Impact Analysis (done) → Stack Trace Explainer → Git History / Time-Travel RAG.
+- Stack trace frame-to-file matching is a heuristic (progressive path-suffix matching + a line-count sanity check) — it can still misattribute a frame if two files share both a basename *and* have enough lines to make the frame's line number plausible in the wrong one. Not expected to be common, but not impossible.
+- CocoIndex's auth registry is process-global — `index_codebase()` previously failed on any upload after the first one in a given server run (`RuntimeError: Auth entry already exists`), masked for most of this project's history by `uvicorn --reload` resetting the registry on every code change. Fixed with a lazy singleton, but not yet re-verified under the specific condition that caused it (two uploads, same process, no restart in between).
