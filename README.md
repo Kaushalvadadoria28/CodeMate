@@ -85,13 +85,14 @@ There is currently no automated test suite, linter config, or CI pipeline — ev
 - **Dead Code / Orphan Detector:** `GET /api/orphans/{project_id}` flags `CodeSymbol` rows with zero inbound `CodeEdge` references as dead-code candidates, reusing the AST graph with no new tables/migrations. Dunder methods excluded by default (`?include_dunder=` to include them). Heuristic by design — see Known Limitations below for false-positive classes.
 - **Automated Onboarding & Architecture Generation + CVE scan:** `GET /api/onboarding/{project_id}` builds a directory tree, parses `requirements.txt`/`package.json` into a dependency manifest, and generates a README-style architecture doc via Gemini grounded in the directory structure, dependencies, and AST symbol summary. Bundles a non-fatal CVE scan of declared dependencies against OSV.dev's public batch API (PyPI/npm) — degrades to an empty result with `vulnerability_scan_degraded: true` rather than failing the request if OSV.dev is unreachable. No new tables/migrations.
 - **Blast Radius Checker (Impact Analysis Agent):** `GET /api/blast-radius/{project_id}` gives Gemini two graph-query tools (`get_callers`/`get_callees`) via the `google-genai` SDK's Automatic Function Calling and lets it traverse the `CodeEdge` graph outward from a target symbol to produce a downstream-impact report. Also ships a scoped call-resolution improvement — simple `var = ClassName(...)` assignments are now tracked so `var.method()` calls on instances of imported classes resolve cross-file, closing a gap present since Phase 5. No new tables/migrations.
+- **Post-Phase-8 hardening pass:** fixed a Windows-specific path-separator mismatch between CocoIndex-written and AST-service-written filenames that had been silently returning an empty `context_map` from `/api/chat` since Phase 5, and a "synthetic wrapping folder" bug where zipping a project inside a top-level folder (the default behavior of most zip tools) broke resolution of every absolute import in the codebase. Both verified fixed against a real `/api/chat` call. Also added CocoIndex silent-row-failure detection (new `EmbeddingSkippedFile` table), an Alembic `include_object` filter so `autogenerate` stops proposing to drop CocoIndex-managed objects, gated `Base.metadata.create_all()` behind an `ENVIRONMENT` setting so it never runs in production, and removed `.env` from the upload allowlist.
 
 ## API Endpoints
 
 | Method | Path | Notes |
 | --- | --- | --- |
 | POST | `/api/upload-codebase` | Multipart zip upload; kicks off background indexing (`status: indexing` → `ready`/`error`) |
-| GET | `/api/indexing-status/{project_id}` | Status, file count, and `ast_skipped_files: [{filename, reason}]` |
+| GET | `/api/indexing-status/{project_id}` | Status, file count, `ast_skipped_files: [{filename, reason}]`, and `embedding_skipped_files: [{filename, reason}]` |
 | POST | `/api/chat` | Vector search + AST context map + history → Gemini; returns `context_map` in the response |
 | POST | `/api/session/save` | Upsert a chat session (title/timestamps) |
 | GET | `/api/sessions/{project_id}` | Paginated, sortable by `updated_at`/`created_at` |
@@ -107,14 +108,13 @@ All responses use the envelope `{ "success": bool, "data": ..., "error": ... }`.
 ## Known Limitations / Open Items
 
 - Call/reference resolution in the AST graph is name-based, not type-aware — precise enough for prompt grounding and orphan-candidate heuristics, not yet for deeper impact analysis (planned for a later "Blast Radius" phase).
-- CocoIndex writes embeddings directly to Postgres, bypassing the SQLAlchemy ORM — a row-level insert failure there doesn't currently surface as an API-visible error.
-- `.env` files are still accepted by the zip validator's extension allowlist; if present in an uploaded codebase, they could be extracted and potentially embedded.
-- `Base.metadata.create_all()` runs on every app startup, which can create new model tables outside of Alembic's tracking.
 - Orphan detection is heuristic: framework-invoked code (e.g. FastAPI route handlers), dynamic/reflective access, and cross-file method calls on class instances can all appear as false-positive "dead code."
 - CVE scan queries unpinned dependencies (no `==` in `requirements.txt`) by package name alone, so results can include CVEs already fixed in the actually-installed version.
 - Two advisory IDs for the same package (e.g. a GHSA ID and a PYSEC ID) can carry identical summary text if they reference the same underlying CVE — results aren't de-duplicated by underlying vulnerability.
 - Cross-file instance-method call resolution (`var.method()`) uses flat, unscoped variable-type tracking — doesn't distinguish function-local vs module-level variables of the same name. A deliberate, bounded heuristic, not full type inference.
 - The Blast Radius report gives no visibility into how many tool calls the agent actually made — its conclusions are plausible and were verified correct against ground truth in testing, but aren't self-auditable from the API response alone.
+- Call resolution can't see a bare function *reference* passed as an argument (e.g. `asyncio.to_thread(some_func, ...)`, `executor.submit(...)`) — only direct `Call` nodes are tracked, so Blast Radius/orphan detection will miss real callers that invoke a symbol this way. Accepted as a documented heuristic limitation, not tracked as a bug.
+- `.env` files, silent CocoIndex embedding failures, and `Base.metadata.create_all()`'s Alembic drift risk were open items through Phase 8 — all fixed in the post-Phase-8 hardening pass above.
 
 ## Roadmap
 
