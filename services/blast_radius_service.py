@@ -9,61 +9,14 @@ tool-calling loop internally (default cap: 10 remote calls) — no manual
 ReAct loop implemented here.
 """
 
-
 class BlastRadiusService:
 
     async def generate_blast_radius(
         self, project_id: str, filename: str, symbol_name: str,
         db_session, llm_service, max_hops: int = 5
     ) -> str:
-        from models.database import CodeEdge
-
-        async def get_callers(filename: str, symbol_name: str) -> list[dict]:
-            """Find everything that calls, imports, or otherwise references
-            the given symbol. Use this to discover what would break if this
-            symbol's behavior changes or it's removed.
-
-            Args:
-                filename: relative path of the file containing the symbol
-                symbol_name: name of the function/method/class/variable being referenced
-            """
-            rows = (
-                db_session.query(CodeEdge)
-                .filter(
-                    CodeEdge.project_id == project_id,
-                    CodeEdge.target_file == filename,
-                    CodeEdge.target_symbol == symbol_name,
-                )
-                .limit(50)
-                .all()
-            )
-            return [
-                {"source_file": r.source_file, "source_symbol": r.source_symbol, "edge_type": r.edge_type}
-                for r in rows
-            ]
-
-        async def get_callees(filename: str, symbol_name: str) -> list[dict]:
-            """Find everything that the given symbol itself calls or
-            imports. Use this to understand what the symbol depends on.
-
-            Args:
-                filename: relative path of the file containing the symbol
-                symbol_name: name of the function/method/class being inspected
-            """
-            rows = (
-                db_session.query(CodeEdge)
-                .filter(
-                    CodeEdge.project_id == project_id,
-                    CodeEdge.source_file == filename,
-                    CodeEdge.source_symbol == symbol_name,
-                )
-                .limit(50)
-                .all()
-            )
-            return [
-                {"target_file": r.target_file, "target_symbol": r.target_symbol, "edge_type": r.edge_type}
-                for r in rows
-            ]
+        from services.graph_tools import build_graph_tools
+        get_callers, get_callees = build_graph_tools(project_id, db_session)
 
         prompt = f"""You are a code-impact analysis assistant. A developer is planning to change the symbol `{symbol_name}` in file `{filename}`.
 
