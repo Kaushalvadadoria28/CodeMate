@@ -15,6 +15,16 @@ def determine_language(extension: str) -> str:
 def extract_extension(filename: str) -> str:
     return os.path.splitext(filename)[1]
 
+@cocoindex.op.function()
+def detect_language(filename: str) -> str:
+    """CocoIndex flow scope fields (file["filename"]) are lazy DAG
+    references, not plain strings, at flow-definition time — calling
+    determine_language()/extract_extension() on one directly wouldn't
+    work. @cocoindex.op.function() registers this as a real transform
+    usable via .transform(), verified against the installed SDK
+    (cocoindex/op.py) before relying on it."""
+    return determine_language(extract_extension(filename))
+
 # Mirrors code_embedding_flow's LocalFile included_patterns/excluded_patterns
 # below — kept as plain extensions/dir names here since we're walking the
 # filesystem directly rather than going through CocoIndex's own source.
@@ -78,7 +88,8 @@ class CocoIndexService:
             
             # 2. Process Files
             with data_scope["files"].row() as file:
-                
+                file["language"] = file["filename"].transform(detect_language)
+
                 # 3. Chunking (Generic Recursive Split)
                 # We remove the custom language extractors to prevent DAG errors
                 file["chunks"] = file["content"].transform(
@@ -102,7 +113,7 @@ class CocoIndexService:
                         location=chunk["location"],
                         code_text=chunk["text"],
                         embedding=chunk["embedding"],
-                        language="code"  # Default fallback
+                        language=file["language"]
                     )
             
             code_embeddings.export(
@@ -158,7 +169,7 @@ class CocoIndexService:
 
         return sorted(expected_files - indexed_files)
 
-    async def search_relevant_code(self, project_id: str, query: str, db_session, top_k: int = 5):
+    async def search_relevant_code(self, project_id: str, query: str, db_session, top_k: int = 5, language: str = None):
         from models.database import CodeEmbedding
         import asyncio
         
@@ -168,9 +179,13 @@ class CocoIndexService:
         query_embedding_list = query_embedding.tolist()
 
         # Perform exact Nearest Neighbor vector search via pgvector cosine distance
-        results = db_session.query(CodeEmbedding).filter(
+        query_obj = db_session.query(CodeEmbedding).filter(
             CodeEmbedding.project_id == project_id
-        ).order_by(
+        )
+        if language:
+            query_obj = query_obj.filter(CodeEmbedding.language == language)
+
+        results = query_obj.order_by(
             CodeEmbedding.embedding.cosine_distance(query_embedding_list)
         ).limit(top_k).all()
 

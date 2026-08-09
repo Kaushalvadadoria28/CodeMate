@@ -15,6 +15,7 @@ class ChatRequest(BaseModel):
     session_id: str
     selected_files: Optional[List[str]] = None
     top_k: int = Field(default=10, ge=1, le=30)  # added for phase 3
+    language: Optional[str] = None
 
 class SessionSaveRequest(BaseModel):
     session_id: str
