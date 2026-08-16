@@ -23,7 +23,7 @@ def _is_retryable(exception):
 class LLMService:
     def __init__(self, api_key: str, model_name: str):
         self.client = genai.Client(api_key=api_key)
-        self.model_name = model_name if "2.5" in model_name else "gemini-2.5-flash"
+        self.model_name = model_name if "2.5" in model_name else "gemini-3.5-flash"
 
     async def generate_response(
         self,
@@ -167,7 +167,27 @@ class LLMService:
                     ),
                 ),
             )
-            return response.text
+            tool_calls = self._extract_tool_calls(response)
+            text = response.text
+            if not text and tool_calls:
+                # AFC hit max_remote_calls while genuinely exploring — the
+                # real data it gathered is sitting in tool_calls, just
+                # never synthesized into text. Reuse it with one more
+                # tool-less call rather than discarding work already paid
+                # for.
+                text = await self._synthesize_from_tool_calls(prompt, tool_calls)
+            elif not text:
+                # Nothing explored at all (e.g. immediately hit the cap
+                # with zero completed calls) — genuinely nothing to
+                # synthesize from.
+                text = (
+                    "(The agent reached its tool-call limit before completing any "
+                    "exploration and did not produce a final summary.)"
+                )
+            return {
+                "text": text,
+                "tool_calls": tool_calls,
+            }
 
         except errors.ServerError as e:
             if e.code in (503, 429):
@@ -183,3 +203,45 @@ class LLMService:
                 status_code=500,
                 detail=f"Unexpected error communicating with AI: {str(e)}"
             )
+
+    async def _synthesize_from_tool_calls(self, original_prompt: str, tool_calls: list[dict]) -> str:
+        """Used when AFC hits its call cap mid-exploration. Feeds the
+        model exactly what it already discovered via tools and asks it
+        to write the final answer from that alone — no more tool access,
+        so this can't loop or hit the cap again."""
+        import json
+
+        synthesis_prompt = f"""{original_prompt}
+
+You already explored the codebase using tools and gathered the following results before running out of further tool calls:
+
+{json.dumps(tool_calls, indent=2)}
+
+Do NOT request any more tool calls — none are available. Using ONLY the information above, write your final answer now, following the instructions given earlier."""
+        return await self.generate_document(synthesis_prompt)
+
+    def _extract_tool_calls(self, response) -> list[dict]:
+        """AFC's automatic_function_calling_history records the full
+        back-and-forth as Content turns — a function_call Part (what the
+        model asked to run) followed by a function_response Part (what
+        the tool returned). Pairs them up so callers can show what the
+        agent actually explored, instead of just trusting its prose
+        summary. Verified this field's shape against the installed SDK
+        (google/genai/types.py) before relying on it."""
+        history = getattr(response, "automatic_function_calling_history", None) or []
+        pending: dict[str, dict] = {}
+        calls: list[dict] = []
+
+        for content in history:
+            for part in (content.parts or []):
+                if part.function_call:
+                    pending[part.function_call.name] = part.function_call.args
+                elif part.function_response:
+                    name = part.function_response.name
+                    calls.append({
+                        "tool": name,
+                        "args": pending.pop(name, None),
+                        "result": part.function_response.response,
+                    })
+
+        return calls

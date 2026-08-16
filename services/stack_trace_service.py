@@ -186,20 +186,24 @@ Be factual — do not invent files, functions, or line numbers that weren't show
 
         if resolved_frames:
             get_callers, get_callees = build_graph_tools(project_id, db_session)
-            explanation = await llm_service.generate_with_tools(
+            result = await llm_service.generate_with_tools(
                 prompt=prompt,
                 tools=[get_callers, get_callees],
                 max_remote_calls=max_hops * 2,
             )
+            explanation = result["text"]
+            tool_calls = result["tool_calls"]
             used_agentic_tools = True
         else:
             explanation = await llm_service.generate_document(prompt)
+            tool_calls = []
             used_agentic_tools = False
 
         return {
             "explanation": explanation,
             "resolved_frames": resolved_frames,
             "used_agentic_tools": used_agentic_tools,
+            "tool_calls": tool_calls,
         }
 
     def _get_file_lines(self, file_cache: dict, codebase_path: Path, filename: str) -> list[str] | None:
