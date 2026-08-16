@@ -127,11 +127,17 @@ class OnboardingResponse(BaseModel):
     vulnerability_scan_degraded: bool
 
 
+class ToolCallRecord(BaseModel):
+    tool: str
+    args: Optional[Dict[str, Any]] = None
+    result: Optional[Dict[str, Any]] = None
+
 class BlastRadiusResponse(BaseModel):
     project_id: str
     filename: str
     symbol_name: str
     impact_report: str
+    tool_calls: List[ToolCallRecord] = []
 
 class ExplainTraceRequest(BaseModel):
     project_id: str
@@ -152,3 +158,4 @@ class ExplainTraceResponse(BaseModel):
     explanation: str
     resolved_frames: List[ResolvedFrame]
     used_agentic_tools: bool
+    tool_calls: List[ToolCallRecord] = []

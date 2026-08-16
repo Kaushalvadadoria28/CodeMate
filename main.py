@@ -581,7 +581,7 @@ async def get_blast_radius(
     if not symbol_exists:
         raise SymbolNotFoundError(project_id, filename, symbol_name)
 
-    impact_report = await blast_radius_service.generate_blast_radius(
+    result = await blast_radius_service.generate_blast_radius(
         project_id, filename, symbol_name, db, llm_service, max_hops=max_hops
     )
 
@@ -589,7 +589,8 @@ async def get_blast_radius(
         project_id=project_id,
         filename=filename,
         symbol_name=symbol_name,
-        impact_report=impact_report,
+        impact_report=result["impact_report"],
+        tool_calls=result["tool_calls"],
     )
     return APIResponse(success=True, data=data.model_dump())
 
@@ -612,5 +613,6 @@ async def explain_trace(request: ExplainTraceRequest, db: Session = Depends(get_
         explanation=result["explanation"],
         resolved_frames=[ResolvedFrame(**f) for f in result["resolved_frames"]],
         used_agentic_tools=result["used_agentic_tools"],
+        tool_calls=result["tool_calls"],
     )
     return APIResponse(success=True, data=data.model_dump())

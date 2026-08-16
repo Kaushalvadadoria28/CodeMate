@@ -31,8 +31,12 @@ Produce a concise impact-analysis report covering:
 
 Be factual and grounded only in what the tools return — do not invent files or symbols that weren't returned."""
 
-        return await llm_service.generate_with_tools(
+        result = await llm_service.generate_with_tools(
             prompt=prompt,
             tools=[get_callers, get_callees],
             max_remote_calls=max_hops * 2,
         )
+        return {
+            "impact_report": result["text"],
+            "tool_calls": result["tool_calls"],
+        }
