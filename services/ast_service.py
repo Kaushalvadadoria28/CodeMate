@@ -299,21 +299,28 @@ class ASTIndexerService:
         return module_map
 
     def detect_synthetic_prefix(self, module_map: dict[str, str]) -> str | None:
-        """Detects a single wrapping top-level directory shared by every
-        entry in module_map — the common case when a zip tool includes
-        the source folder itself as the zip's sole top-level entry (e.g.
-        "adk_mcp/agents/prompts.py", "CM/main.py"), rather than the
-        project's files sitting directly at the zip root. The real
-        codebase's absolute imports never reference this synthetic name,
-        so it must be tried as a fallback prefix — see
-        _ImportVisitor._lookup(). Returns None if there's no single
-        common top-level directory (multi-package upload, or files
-        already at the root)."""
-        top_level_dirs = {rel_path.split("/", 1)[0] for rel_path in module_map.values() if "/" in rel_path}
-        top_level_all = {rel_path.split("/", 1)[0] for rel_path in module_map.values()}
-        if len(top_level_all) == 1 and top_level_dirs == top_level_all:
-            return next(iter(top_level_all))
-        return None
+        """Detects the longest leading directory path shared by every file
+        in the project, so absolute imports resolve past however many
+        levels of wrapping sit above the code's real import root — a
+        zip's own wrapping folder, a monorepo subproject folder (e.g.
+        Backend/ alongside Frontend/), or both stacked together.
+        Generalizes the original single-level version (which only found
+        one wrapping folder) — same safety principle applies: this only
+        ever adds a fallback lookup path in _ImportVisitor._lookup(),
+        never overrides a plain lookup that already succeeds, so
+        detecting a longer shared prefix is strictly safer, not riskier."""
+        all_dirs = [rel_path.split("/")[:-1] for rel_path in module_map.values()]
+        if not all_dirs or any(len(dirs) == 0 for dirs in all_dirs):
+            return None  # at least one file sits at the parsed root — no common wrapping prefix
+
+        common: list[str] = []
+        for level in range(min(len(dirs) for dirs in all_dirs)):
+            candidates = {dirs[level] for dirs in all_dirs}
+            if len(candidates) != 1:
+                break
+            common.append(next(iter(candidates)))
+
+        return ".".join(common) if common else None
 
     def parse_codebase(self, project_id: str, codebase_path: str) -> tuple[list[dict], list[dict], list[dict]]:
         """Returns (symbol_rows, edge_rows, skipped_files).
