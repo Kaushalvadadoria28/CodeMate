@@ -7,15 +7,22 @@ class RAGService:
         self.db = db_session
         self.ast_service = ast_service
 
-    async def process_query(self, project_id: str, query: str, session_id: str, selected_files: list[str] = None, top_k: int = 10, language: str = None):
-        # 1. Retrieve (Mocked call - assumes you implement the vector query here)
-        relevant_code = await self.cocoindex.search_relevant_code(
-            project_id=project_id, 
-            query=query, 
-            db_session=self.db,
-            top_k=top_k,
-            language=language
-        )
+    async def process_query(self, project_id: str, query: str, session_id: str, selected_files: list[str] = None, top_k: int = 10, language: str = None, selected_symbol: str = None,
+                             selected_symbol_file: str = None, codebase_path: str = None):
+        if selected_symbol:
+            symbol_source = self.ast_service.get_symbol_source(
+                project_id, selected_symbol_file, selected_symbol, codebase_path, self.db
+            )
+            relevant_code = [symbol_source]
+        else:
+            # 1. Retrieve (Mocked call - assumes you implement the vector query here)
+            relevant_code = await self.cocoindex.search_relevant_code(
+                project_id=project_id,
+                query=query,
+                db_session=self.db,
+                top_k=top_k,
+                language=language
+            )
         
         # 2. Filter
         if selected_files:

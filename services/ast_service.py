@@ -430,6 +430,40 @@ class ASTIndexerService:
             return None
         return min(candidates, key=lambda s: s.end_line - s.start_line)
 
+    def get_symbol_source(self, project_id: str, filename: str, symbol_name: str,
+                           codebase_path: str, db_session) -> dict | None:
+        """Exact source text for one named symbol in one file, for
+        symbol-scoped chat — bypasses vector search entirely so the LLM
+        is grounded in the real definition rather than a retrieval guess.
+        Caller (main.py) is expected to have already confirmed the symbol
+        exists (same precedent as /api/blast-radius) — returns None only
+        if that invariant is somehow violated between the check and this
+        call."""
+        from models.database import CodeSymbol
+
+        symbol = (
+            db_session.query(CodeSymbol)
+            .filter(
+                CodeSymbol.project_id == project_id,
+                CodeSymbol.filename == filename,
+                CodeSymbol.symbol_name == symbol_name,
+            )
+            .first()
+        )
+        if not symbol:
+            return None
+
+        abs_path = Path(codebase_path) / filename
+        lines = abs_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        code_text = "\n".join(lines[symbol.start_line - 1: symbol.end_line])
+
+        return {
+            "filename": filename,
+            "location": f"L{symbol.start_line}-L{symbol.end_line}",
+            "code_text": code_text,
+            "language": None,
+        }
+
     def find_orphan_symbols(self, project_id: str, db_session, include_dunder: bool = False) -> dict:
         """Symbols with zero inbound CodeEdge references — candidates for
         dead/orphaned code. Heuristic, not certain: misses symbols only
