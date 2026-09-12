@@ -314,6 +314,21 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     if project.status != "ready":
         raise ProjectNotReadyError(request.project_id, project.status)
 
+    codebase_path = None
+    if request.selected_symbol:
+        symbol_exists = (
+            db.query(CodeSymbol)
+            .filter(
+                CodeSymbol.project_id == request.project_id,
+                CodeSymbol.filename == request.selected_symbol_file,
+                CodeSymbol.symbol_name == request.selected_symbol,
+            )
+            .first()
+        )
+        if not symbol_exists:
+            raise SymbolNotFoundError(request.project_id, request.selected_symbol_file, request.selected_symbol)
+        codebase_path = str(settings.UPLOAD_DIR / request.project_id)
+
     rag_service = RAGService(coco_service, llm_service, db, ast_service)
     result = await rag_service.process_query(
         project_id=request.project_id,
@@ -321,9 +336,13 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
         session_id=request.session_id,
         selected_files=request.selected_files,
         top_k=request.top_k,
-        language=request.language
+        language=request.language,
+        selected_symbol=request.selected_symbol,
+        selected_symbol_file=request.selected_symbol_file,
+        codebase_path=codebase_path
     )
     return APIResponse(success=True, data=result)
+
 
 @app.post("/api/session/save", response_model=APIResponse)
 async def save_session(
