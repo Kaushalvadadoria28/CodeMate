@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import List, Optional, Any, Dict
 from datetime import datetime
 
@@ -16,6 +16,14 @@ class ChatRequest(BaseModel):
     selected_files: Optional[List[str]] = None
     top_k: int = Field(default=10, ge=1, le=30)  # added for phase 3
     language: Optional[str] = None
+    selected_symbol: Optional[str] = None
+    selected_symbol_file: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_symbol_pair(self):
+        if bool(self.selected_symbol) != bool(self.selected_symbol_file):
+            raise ValueError("selected_symbol and selected_symbol_file must both be provided together")
+        return self
 
 class SessionSaveRequest(BaseModel):
     session_id: str
