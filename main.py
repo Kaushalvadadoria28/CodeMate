@@ -4,6 +4,7 @@ import zipfile
 import os
 import asyncio
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks, Request, Query
 from fastapi.responses import JSONResponse
@@ -92,7 +93,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             "data": None,
             "error": {
                 "message": "Invalid request parameters",
-                "details": exc.errors(),
+                "details": jsonable_encoder(exc.errors()),
                 "code": "VALIDATION_ERROR"
             }
         }
