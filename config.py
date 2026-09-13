@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # Google Gemini API
     GEMINI_API_KEY: str
-    GEMINI_MODEL: str = "gemini-1.5-flash" # or "gemini-1.5-pro"
+    GEMINI_MODEL: str = "gemini-2.5-flash" # or "gemini-1.5-pro"
     
     # File Storage
     UPLOAD_DIR: Path = Path(__file__).resolve().parent.parent / "uploads"

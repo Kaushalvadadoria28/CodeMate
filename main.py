@@ -17,6 +17,7 @@ from config import settings
 from models.database import Base, Project, ChatSession, CodeEmbedding, Message, CodeSymbol, CodeEdge, ASTSkippedFile, EmbeddingSkippedFile
 from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse, OrphanSymbolResponse, OrphanReportResponse, DependencyInfo, VulnerabilityInfo, OnboardingResponse, BlastRadiusResponse, ExplainTraceRequest, ExplainTraceResponse, ResolvedFrame
 from services.ast_service import ASTIndexerService 
+from services.js_ast_service import JSASTIndexerService
 from services.cocoindex_service import CocoIndexService
 from services.llm_service import LLMService
 from services.rag_service import RAGService
@@ -52,6 +53,7 @@ def get_db():
 # --- Service Initialization ---
 coco_service = CocoIndexService()
 ast_service = ASTIndexerService()
+js_ast_service = JSASTIndexerService()
 onboarding_service = OnboardingService()
 blast_radius_service = BlastRadiusService()
 stack_trace_service = StackTraceExplainerService()
@@ -227,6 +229,34 @@ async def process_codebase_task(project_id: str, file_path: str):
         except Exception as ast_error:
             db.rollback()
             print(f"AST indexing failed for project {project_id} (non-fatal): {ast_error}")
+
+        # build JS/TS AST context map (Feature 6). Non-fatal — chat still
+        # works via vector search + the Python-only AST graph if this fails.
+        try:
+            js_symbol_rows, js_edge_rows, js_skipped_files = await asyncio.to_thread(
+                js_ast_service.parse_codebase, project_id, str(extract_path)
+            )
+            if js_symbol_rows:
+                db.bulk_insert_mappings(CodeSymbol, js_symbol_rows)
+            if js_edge_rows:
+                from sqlalchemy.dialects.postgresql import insert as pg_insert
+                stmt = pg_insert(CodeEdge).values(js_edge_rows).on_conflict_do_nothing(
+                    index_elements=["project_id", "source_file", "target_file",
+                                     "edge_type", "source_symbol", "target_symbol"]
+                )
+                db.execute(stmt)
+            if js_skipped_files:
+                js_skipped_rows = [
+                    {"id": str(uuid.uuid4()), "project_id": project_id, **sf}
+                    for sf in js_skipped_files
+                ]
+                db.bulk_insert_mappings(ASTSkippedFile, js_skipped_rows)
+            db.commit()
+            print(f"JS/TS AST indexing complete for {project_id}: {len(js_symbol_rows)} symbols, "
+                  f"{len(js_edge_rows)} edges, {len(js_skipped_files)} file(s) skipped")
+        except Exception as js_ast_error:
+            db.rollback()
+            print(f"JS/TS AST indexing failed for project {project_id} (non-fatal): {js_ast_error}")
 
         # 4. Finish
         if project:
