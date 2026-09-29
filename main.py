@@ -15,7 +15,7 @@ from typing import List, Optional
 
 from config import settings
 from models.database import Base, Project, ChatSession, CodeEmbedding, Message, CodeSymbol, CodeEdge, ASTSkippedFile, EmbeddingSkippedFile
-from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse, OrphanSymbolResponse, OrphanReportResponse, DependencyInfo, VulnerabilityInfo, OnboardingResponse, BlastRadiusResponse, ExplainTraceRequest, ExplainTraceResponse, ResolvedFrame
+from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse, OrphanSymbolResponse, OrphanReportResponse, DependencyInfo, VulnerabilityInfo, OnboardingResponse, BlastRadiusResponse, ExplainTraceRequest, ExplainTraceResponse, ResolvedFrame, SuggestFixRequest, SuggestFixResponse
 from services.ast_service import ASTIndexerService 
 from services.js_ast_service import JSASTIndexerService
 from services.cocoindex_service import CocoIndexService
@@ -26,6 +26,7 @@ from services.zip_validator import validate_zip
 from exceptions import ProjectNotFoundError, SessionNotFoundError, ProjectNotReadyError, SymbolNotFoundError
 from services.blast_radius_service import BlastRadiusService
 from services.stack_trace_service import StackTraceExplainerService
+from services.fix_suggestion_service import FixSuggestionService
 
 
 # --- Database Setup ---
@@ -57,6 +58,7 @@ js_ast_service = JSASTIndexerService()
 onboarding_service = OnboardingService()
 blast_radius_service = BlastRadiusService()
 stack_trace_service = StackTraceExplainerService()
+fix_suggestion_service = FixSuggestionService()
 llm_service = LLMService(
     api_key=settings.GEMINI_API_KEY,
     model_name=settings.GEMINI_MODEL
@@ -664,5 +666,33 @@ async def explain_trace(request: ExplainTraceRequest, db: Session = Depends(get_
         resolved_frames=[ResolvedFrame(**f) for f in result["resolved_frames"]],
         used_agentic_tools=result["used_agentic_tools"],
         tool_calls=result["tool_calls"],
+    )
+    return APIResponse(success=True, data=data.model_dump())
+
+@app.post("/api/suggest-fix", response_model=APIResponse)
+async def suggest_fix(request: SuggestFixRequest, db: Session = Depends(get_db)):
+    project = db.query(Project).filter(Project.id == request.project_id).first()
+    if not project:
+        raise ProjectNotFoundError(request.project_id)
+    if project.status != "ready":
+        raise ProjectNotReadyError(request.project_id, project.status)
+
+    codebase_path = str(settings.UPLOAD_DIR / request.project_id)
+    context = request.model_dump(exclude={"project_id", "source"})
+
+    result = await fix_suggestion_service.suggest_fix(
+        project_id=request.project_id,
+        source=request.source,
+        context=context,
+        codebase_path=codebase_path,
+        llm_service=llm_service,
+    )
+
+    data = SuggestFixResponse(
+        project_id=request.project_id,
+        source=request.source,
+        explanation=result["explanation"],
+        suggested_diff=result["suggested_diff"],
+        diff_may_be_invalid=result["diff_may_be_invalid"],
     )
     return APIResponse(success=True, data=data.model_dump())
