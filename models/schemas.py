@@ -196,3 +196,34 @@ class SuggestFixResponse(BaseModel):
     explanation: str
     suggested_diff: str
     diff_may_be_invalid: bool
+
+class SymbolDiffEntry(BaseModel):
+    filename: str
+    symbol_name: str
+    symbol_type: str
+
+class ModifiedSymbolEntry(BaseModel):
+    filename: str
+    symbol_name: str
+    symbol_type: str
+    old_start_line: int
+    old_end_line: int
+    new_start_line: int
+    new_end_line: int
+
+class EdgeDiffEntry(BaseModel):
+    source_file: str
+    target_file: Optional[str] = None
+    edge_type: str
+    source_symbol: Optional[str] = None
+    target_symbol: Optional[str] = None
+
+class ProjectDiffResponse(BaseModel):
+    old_project_id: str
+    new_project_id: str
+    added_symbols: List[SymbolDiffEntry]
+    removed_symbols: List[SymbolDiffEntry]
+    modified_symbols: List[ModifiedSymbolEntry]
+    added_edges: List[EdgeDiffEntry]
+    removed_edges: List[EdgeDiffEntry]
+    note: str
