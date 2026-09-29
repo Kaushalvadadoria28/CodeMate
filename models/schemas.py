@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, model_validator
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Literal
 from datetime import datetime
 
 # Common Response Wrapper
@@ -167,3 +167,32 @@ class ExplainTraceResponse(BaseModel):
     resolved_frames: List[ResolvedFrame]
     used_agentic_tools: bool
     tool_calls: List[ToolCallRecord] = []
+
+class SuggestFixRequest(BaseModel):
+    project_id: str
+    source: Literal["trace", "blast_radius"]
+    # required when source == "trace"
+    explanation: Optional[str] = None
+    resolved_frames: Optional[List[ResolvedFrame]] = None
+    # required when source == "blast_radius"
+    filename: Optional[str] = None
+    symbol_name: Optional[str] = None
+    impact_report: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_source_fields(self):
+        if self.source == "trace":
+            if self.explanation is None or self.resolved_frames is None:
+                raise ValueError("source='trace' requires explanation and resolved_frames")
+        else:
+            if not self.filename or not self.symbol_name or self.impact_report is None:
+                raise ValueError("source='blast_radius' requires filename, symbol_name, and impact_report")
+        return self
+
+
+class SuggestFixResponse(BaseModel):
+    project_id: str
+    source: str
+    explanation: str
+    suggested_diff: str
+    diff_may_be_invalid: bool
