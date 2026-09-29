@@ -15,7 +15,7 @@ from typing import List, Optional
 
 from config import settings
 from models.database import Base, Project, ChatSession, CodeEmbedding, Message, CodeSymbol, CodeEdge, ASTSkippedFile, EmbeddingSkippedFile
-from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse, OrphanSymbolResponse, OrphanReportResponse, DependencyInfo, VulnerabilityInfo, OnboardingResponse, BlastRadiusResponse, ExplainTraceRequest, ExplainTraceResponse, ResolvedFrame, SuggestFixRequest, SuggestFixResponse
+from models.schemas import APIResponse, ChatRequest, SessionSaveRequest, SessionResponse, PaginatedSessionsResponse, MessageResponse, PaginatedMessagesResponse, SymbolResponse, ContextMapResponse, OrphanSymbolResponse, OrphanReportResponse, DependencyInfo, VulnerabilityInfo, OnboardingResponse, BlastRadiusResponse, ExplainTraceRequest, ExplainTraceResponse, ResolvedFrame, SuggestFixRequest, SuggestFixResponse, SymbolDiffEntry, ModifiedSymbolEntry, EdgeDiffEntry, ProjectDiffResponse
 from services.ast_service import ASTIndexerService 
 from services.js_ast_service import JSASTIndexerService
 from services.cocoindex_service import CocoIndexService
@@ -27,6 +27,7 @@ from exceptions import ProjectNotFoundError, SessionNotFoundError, ProjectNotRea
 from services.blast_radius_service import BlastRadiusService
 from services.stack_trace_service import StackTraceExplainerService
 from services.fix_suggestion_service import FixSuggestionService
+from services.diff_service import DiffService
 
 
 # --- Database Setup ---
@@ -59,6 +60,7 @@ onboarding_service = OnboardingService()
 blast_radius_service = BlastRadiusService()
 stack_trace_service = StackTraceExplainerService()
 fix_suggestion_service = FixSuggestionService()
+diff_service = DiffService()
 llm_service = LLMService(
     api_key=settings.GEMINI_API_KEY,
     model_name=settings.GEMINI_MODEL
@@ -573,6 +575,38 @@ async def get_orphan_symbols(
         excluded_count=result["excluded_count"],
         orphan_count=len(result["orphans"]),
         orphans=[OrphanSymbolResponse.model_validate(s) for s in result["orphans"]]
+    )
+    return APIResponse(success=True, data=data.model_dump())
+
+@app.get("/api/diff", response_model=APIResponse)
+async def get_project_diff(
+    old_project_id: str = Query(...),
+    new_project_id: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    old_project = db.query(Project).filter(Project.id == old_project_id).first()
+    if not old_project:
+        raise ProjectNotFoundError(old_project_id)
+    new_project = db.query(Project).filter(Project.id == new_project_id).first()
+    if not new_project:
+        raise ProjectNotFoundError(new_project_id)
+
+    result = diff_service.diff_projects(old_project_id, new_project_id, db, ast_service)
+
+    data = ProjectDiffResponse(
+        old_project_id=old_project_id,
+        new_project_id=new_project_id,
+        added_symbols=[SymbolDiffEntry(**s) for s in result["added_symbols"]],
+        removed_symbols=[SymbolDiffEntry(**s) for s in result["removed_symbols"]],
+        modified_symbols=[ModifiedSymbolEntry(**s) for s in result["modified_symbols"]],
+        added_edges=[EdgeDiffEntry(**e) for e in result["added_edges"]],
+        removed_edges=[EdgeDiffEntry(**e) for e in result["removed_edges"]],
+        note=(
+            "Symbol/edge comparison is positional (start_line/end_line deltas), not a real "
+            "content diff. Each project's own zip-wrapping prefix is stripped before comparing "
+            "filenames. These two project IDs are not verified to be related — that's assumed "
+            "by the caller."
+        ),
     )
     return APIResponse(success=True, data=data.model_dump())
 
